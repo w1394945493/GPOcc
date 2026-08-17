@@ -38,7 +38,7 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
 
         self.occscannet_root = data_path
         self.phase = phase
-        
+
         self.num_frames = num_frames
         self.offset = offset
         self.grid_size_occ = grid_size_occ
@@ -56,10 +56,9 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         with open(subscenes_list, 'r') as f:
             self.used_subscenes = f.readlines()
             for i in range(len(self.used_subscenes)):
-                self.used_subscenes[i] = f'{self.occscannet_root}/' + self.used_subscenes[i].strip()
-        
+                self.used_subscenes[i] = f'{self.occscannet_root}/' + self.used_subscenes[i].strip() # train:45610
+
         self.num_pts = num_pts
-        
         self.normalize_rgb = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -213,7 +212,7 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         vox_far = vox_near + meta['scene_size']
         nyu_pc_range = np.concatenate([vox_near, vox_far], axis=0)
         meta['nyu_pc_range'] = nyu_pc_range
-        
+
         scan = meta['occ_xyz'][nonemptymask]
         meta['occ_xyz_nonempty'] = scan
         meta['num_depth'] = self.num_pts
@@ -228,7 +227,7 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
             scan = np.concatenate([scan, scan_], 0)
         else:
             scan = scan[np.random.choice(scan.shape[0], self.num_pts, False)]
-        
+
         scan[:, 0] = (scan[:, 0] - nyu_pc_range[0]) / (nyu_pc_range[3] - nyu_pc_range[0])
         scan[:, 1] = (scan[:, 1] - nyu_pc_range[1]) / (nyu_pc_range[4] - nyu_pc_range[1])
         scan[:, 2] = (scan[:, 2] - nyu_pc_range[2]) / (nyu_pc_range[5] - nyu_pc_range[2])
@@ -251,13 +250,12 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
 
     def get_meshgrid(self, ranges, grid, reso):
         pass
-    
+
     def get_data_info(self, info):
         pass
 
     def get_scene_index(self, scene_name=None):
         pass
-
 
 
 def read_depth(depth_path):
@@ -271,4 +269,3 @@ def read_depth(depth_path):
     depth_inpaint = depth_vis_array.astype(np.float32) / 1000.0  
       
     return depth_inpaint
-

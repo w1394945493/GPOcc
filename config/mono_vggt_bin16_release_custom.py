@@ -12,12 +12,13 @@ optimizer_wrapper = dict(
 grad_max_norm = 1.0
 amp = False
 seed = 1
-print_freq = 50
+# print_freq = 50
+print_freq = 1 
 eval_freq = 2
 max_epochs = 10
 save_freq = 5  # 每隔多少epoch保存一次model
-# load_from = None
-load_from = ''
+load_from = None
+# load_from = ''
 find_unused_parameters = True
 track_running_stats = True
 flag_depthanything_as_gt = False
@@ -150,8 +151,8 @@ val_wrapper_config = dict(
 train_loader_config = dict(
     # batch_size = 2,
     # num_workers = 5,
-    batch_size=1,
-    num_workers=0,
+    batch_size=2,
+    num_workers=8,
     shuffle=True,
 )
 
@@ -159,6 +160,6 @@ val_loader_config = dict(
     # batch_size = 1,
     # num_workers = 2,
     batch_size=1,
-    num_workers=0,
+    num_workers=4,
     shuffle=False,
 )

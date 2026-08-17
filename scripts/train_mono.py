@@ -257,10 +257,15 @@ def main(args):
                         data[i] = data[i].cuda()
                 (imgs, metas, label) = data
 
-                for k, v in metas[0].items():
-                    if not (k in metas_tensor_keys_inv):
-                        metas[0][k] = torch.tensor(v).cuda()
-                metas[0]['img_depthbranch'] = metas[0]['img_depthbranch'].cuda()
+                device = imgs.device
+                for meta in metas:
+                    for k, v in meta.items():
+                        if k not in metas_tensor_keys_inv:
+                            if isinstance(v, torch.Tensor):
+                                meta[k] = v.to(device)
+                            else:
+                                meta[k] = torch.as_tensor(v, device=device)
+                    meta["img_depthbranch"] = meta["img_depthbranch"].to(device)
 
                 with torch.cuda.amp.autocast(enabled=amp):
                     # ===========================================#
@@ -332,10 +337,16 @@ def main(args):
                     data[i] = data[i].cuda()
             (imgs, metas, label) = data
 
-            for k, v in metas[0].items():
-                if not (k in metas_tensor_keys_inv):
-                    metas[0][k] = torch.tensor(v).cuda()
-            metas[0]['img_depthbranch'] = metas[0]['img_depthbranch'].cuda()
+            device = imgs.device
+            for meta in metas:
+                for k, v in meta.items():
+                    if k not in metas_tensor_keys_inv:
+                        if isinstance(v, torch.Tensor):
+                            meta[k] = v.to(device)
+                        else:
+                            meta[k] = torch.as_tensor(v, device=device)
+                meta['img_depthbranch'] = meta['img_depthbranch'].to(device)
+
             # forward + backward + optimize
             data_time_e = time.time()
 
@@ -400,8 +411,21 @@ def main(args):
             if i_iter % print_freq == 0 and is_main_process():
                 lr = optimizer.param_groups[0]['lr']
                 loss_info = loss_record.loss_info()
-                logger.info('[TRAIN] Epoch %d Iter %5d/%d   ' % (epoch+1, i_iter, len(train_dataset_loader)) + loss_info +
-                            'GradNorm: %.3f,   lr: %.7f,   time: %.3f (%.3f)' % (grad_norm, lr, time_e - time_s, data_time_e - data_time_s))
+                # logger.info('[TRAIN] Epoch %d Iter %5d/%d   ' % (epoch+1, i_iter, len(train_dataset_loader)) + loss_info +
+                #             'GradNorm: %.3f,   lr: %.7f,   time: %.3f (%.3f)' % (grad_norm, lr, time_e - time_s, data_time_e - data_time_s))
+                logger.info(
+                    "[TRAIN] Epoch %d Iter %5d/%d   "
+                    % (epoch + 1, i_iter, len(train_dataset_loader))
+                    + loss_info
+                    + "GradNorm: %.3f,   lr: %.7f,   memory: %.2f GB,   time: %.3f (%.3f)"
+                    % (
+                        grad_norm,
+                        lr,
+                        torch.cuda.memory_allocated() / 1024**3,
+                        time_e - time_s,
+                        data_time_e - data_time_s,
+                    )
+                )
                 loss_record.reset()
             data_time_s = time.time()
             time_s = time.time()
@@ -433,10 +457,15 @@ def main(args):
                             data[i] = data[i].cuda()
                     (imgs, metas, label) = data
 
-                    for k, v in metas[0].items():
-                        if not (k in metas_tensor_keys_inv):
-                            metas[0][k] = torch.tensor(v).cuda()
-                    metas[0]['img_depthbranch'] = metas[0]['img_depthbranch'].cuda()
+                    device = imgs.device
+                    for meta in metas:
+                        for k, v in meta.items():
+                            if k not in metas_tensor_keys_inv:
+                                if isinstance(v, torch.Tensor):
+                                    meta[k] = v.to(device)
+                                else:
+                                    meta[k] = torch.as_tensor(v, device=device)
+                        meta['img_depthbranch'] = meta['img_depthbranch'].to(device)
 
                     with torch.cuda.amp.autocast(enabled=amp):
                         result_dict, my_occ, predtoreturn = my_model(
