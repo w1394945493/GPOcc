@@ -42,7 +42,7 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         self.num_frames = num_frames
         self.offset = offset
         self.grid_size_occ = grid_size_occ
-        self.grid_size_occ_coarse = (np.array(grid_size_occ) // coarse_ratio).astype(np.uint32)
+        self.grid_size_occ_coarse = (np.array(grid_size_occ) // coarse_ratio).astype(np.uint32) # (30 30 18)
         self.coarse_ratio = coarse_ratio
         self.empty_idx = empty_idx
         self.phase = phase
@@ -85,8 +85,8 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
 
         meta = {}
         meta['name'] = this_name # 'scene0000_00/00000'
-        meta['scene_size'] = self.scene_size
-        cam_pose = data['cam_pose']
+        meta['scene_size'] = self.scene_size # (4.8 4.8 2.88)
+        cam_pose = data['cam_pose'] # (4 4)
         meta['cam2world'] = cam_pose
         world2cam = np.linalg.inv(cam_pose)
         meta['world2cam'] = world2cam
@@ -176,9 +176,9 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         # 把代表unknown的255换成0，把代表空的0换成12
         target[target == 0] = 12
         target[target == 255] = 0 
-        occ = target # (60, 60, 36)
+        occ = target                # (60, 60, 36)
         nonemptymask = (occ != 12)
-        occ = [occ] # [1, 60, 60, 36]
+        occ = [occ]                 # [1, 60, 60, 36]
 
         # compute the 3D-2D mapping
         projected_pix, fov_mask, pix_z, occ_xyz = vox2pix(
@@ -244,8 +244,8 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         meta['occ_mask_valid_fov'] = (occ != 0) & fov_mask
         meta['label'] = occ
 
-        imgs = np.stack(img, 0)
-        occs = np.stack(occ, 0)
+        imgs = np.stack(img, 0) # (1 1 392 518 3) 长边保持为518
+        occs = np.stack(occ, 0) # (1 60 60 36)
         data_tuple = (imgs, meta, occs)
         return data_tuple
 

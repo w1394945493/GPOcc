@@ -57,14 +57,14 @@ class DepthLoss(BaseLoss):
         
     def get_depth_loss(self, depth_labels, depth_preds):
         # Ensure both are float tensors
-        depth_labels = depth_labels.to(dtype=torch.float32)
-        depth_preds = depth_preds.to(dtype=torch.float32)
+        depth_labels = depth_labels.to(dtype=torch.float32) # (1 480 640)
+        depth_preds = depth_preds.to(dtype=torch.float32)   # (1 1 56 74)
 
         # Resize prediction to match label resolution
         if depth_preds.shape[-2:] != depth_labels.shape[-2:]:
             depth_preds = F.interpolate(
                 depth_preds, size=depth_labels.shape[-2:], mode='bilinear', align_corners=True
-            )
+            )   # (1 1 480 640)
 
         # Create valid mask: ignore invalid (<= 0) ground-truth
         valid_mask = (depth_labels > 0).to(dtype=torch.float32)  # (B, 1, H, W)

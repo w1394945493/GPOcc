@@ -9,3 +9,4 @@ __pycache__/
 .codex
 /.claude
 /src/gpocc/model/head/gaussian_occ_head/ops/localagg_prob_gf2/build/
+outputs/

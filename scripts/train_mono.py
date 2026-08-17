@@ -4,6 +4,8 @@ import gc
 import torch.nn.functional as F
 import torch.distributed as dist
 from tqdm import tqdm
+
+
 from gpocc.utils.iou_eval import IOUEvalBatch
 from gpocc.utils.iou_as_iso import SSCMetrics, SSCMetricsTorch
 from gpocc.utils.loss_record import LossRecord
@@ -50,28 +52,31 @@ def get_dist_info():
     return rank, world_size
 
 
-def save_model(model, optimizer=None, scheduler=None, epoch=None, **kwargs):
-    dict_to_save = {
-        'state_dict': model.state_dict()
-    }
+def save_model(
+    model, optimizer=None, scheduler=None, epoch=None, save_epoch=False, **kwargs
+):
+    dict_to_save = {"state_dict": model.state_dict()}
+
     if optimizer is not None:
-        dict_to_save['optimizer'] = optimizer.state_dict()
+        dict_to_save["optimizer"] = optimizer.state_dict()
 
     if scheduler is not None:
-        dict_to_save['scheduler'] = scheduler.state_dict()
+        dict_to_save["scheduler"] = scheduler.state_dict()
 
     if len(kwargs):
         dict_to_save.update(kwargs)
 
     if epoch is not None:
-        dict_to_save['epoch'] = epoch
-        save_file_name = os.path.join(os.path.abspath(args.work_dir), f'epoch_{epoch}.pth')
-    else:
-        save_file_name = os.path.join(os.path.abspath(args.work_dir), f'ckpt.pth')
+        dict_to_save["epoch"] = epoch
 
-    torch.save(dict_to_save, save_file_name)
-    dst_file = osp.join(args.work_dir, 'latest.pth')
-    symlink(save_file_name, dst_file)
+    # 1. latest.pth 每次都保存
+    latest_file = os.path.join(os.path.abspath(args.work_dir), "latest.pth")
+    torch.save(dict_to_save, latest_file)
+
+    # 2. epoch_x.pth 按需保存
+    if save_epoch and epoch is not None:
+        epoch_file = os.path.join(os.path.abspath(args.work_dir), f"epoch_{epoch}.pth")
+        torch.save(dict_to_save, epoch_file)
 
 
 def main(args):
@@ -80,28 +85,38 @@ def main(args):
 
     # load config
     cfg = Config.fromfile(args.py_config)
-    set_random_seed(cfg.seed)
+    set_random_seed(cfg.seed) # seed:1
     cfg.work_dir = args.work_dir
-    max_num_epochs = cfg.max_epochs
+    max_num_epochs = cfg.max_epochs # 10
     eval_freq = cfg.eval_freq
+
+    save_freq = cfg.get("save_freq", 1) # 每隔几个epoch保存一次model
+
     print_freq = cfg.print_freq
     vis_freq = cfg.get('vis_freq', 10)
     if args.vis_freq:
         vis_freq = args.vis_freq
 
-    # init DDP
-    distributed = True
-    world_size = int(os.environ["WORLD_SIZE"])  # number of nodes
-    rank = int(os.environ["RANK"])  # node id
+    # ====================================== #
+    distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    if distributed:
+        # init DDP
+        # distributed = True
+        world_size = int(os.environ["WORLD_SIZE"])  # number of nodes
+        rank = int(os.environ["RANK"])  # node id
 
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(rank % num_gpus)
-    dist.init_process_group(
-        backend="nccl",
-        # init_method=f"env://", 
-        world_size=world_size,
-    )
-    rank, world_size = get_dist_info()
+        num_gpus = torch.cuda.device_count()
+        torch.cuda.set_device(rank % num_gpus)
+        dist.init_process_group(
+            backend="nccl",
+            # init_method=f"env://", 
+            world_size=world_size,
+        )
+        rank, world_size = get_dist_info()
+    else:
+        rank = 0
+        world_size = 1
+        # torch.cuda.set_device(0)
 
     if not is_main_process():
         import builtins
@@ -123,15 +138,16 @@ def main(args):
         log_level='INFO')
     logger.info(f'Config:\n{cfg.pretty_text}')
 
-    # build model
+    # ===================================#
+    # 定义model build model
     from gpocc.model import build_model
     my_model = build_model(cfg.model).cuda()
-    
+
     if cfg.flag_depthanything_as_gt:
         my_model.depthanything.requires_grad_(False)
 
     n_parameters = sum(p.numel() for p in my_model.parameters() if p.requires_grad)
-    logger.info(f'Number of params: {n_parameters}')
+    logger.info(f'Number of params: {n_parameters}') # 可学习参数 944,309,688
 
     if distributed:
         find_unused_parameters = cfg.get('find_unused_parameters', True)
@@ -148,6 +164,7 @@ def main(args):
 
     logger.info('done ddp model')
 
+    # ======================================#
     # build dataloader
     from gpocc.dataset import build_dataloader
     train_dataset_loader, val_dataset_loader = \
@@ -246,6 +263,7 @@ def main(args):
                 metas[0]['img_depthbranch'] = metas[0]['img_depthbranch'].cuda()
 
                 with torch.cuda.amp.autocast(enabled=amp):
+                    # ===========================================#
 
                     result_dict, my_occ, predtoreturn = my_model(
                         imgs=imgs,
@@ -298,7 +316,6 @@ def main(args):
 
         return
 
-
     # training
     while epoch < max_num_epochs:
 
@@ -330,7 +347,7 @@ def main(args):
                     test_mode=False)
 
             assert cfg.ignore_label == 0
-
+            # 损失计算
             # TODO hard code
             if 'vggt' in args.py_config.lower() or 'dpt' in args.py_config.lower():
                 total_loss = 0.
@@ -388,18 +405,21 @@ def main(args):
                 loss_record.reset()
             data_time_s = time.time()
             time_s = time.time()
-            
+
         # save checkpoint
         if is_main_process():
             save_model(
-                my_model, optimizer,
-                scheduler, epoch + 1, 
+                my_model,
+                optimizer,
+                scheduler,
+                epoch + 1,
+                save_epoch=((epoch + 1) % save_freq == 0),
                 global_iter=global_iter,
                 best_val_iou=best_val_iou,
-                best_val_miou=best_val_miou)
+                best_val_miou=best_val_miou,
+            )
 
         epoch += 1
-
         # eval
         if epoch % eval_freq == 0:
             my_model.eval()
@@ -412,7 +432,7 @@ def main(args):
                         if isinstance(data[i], torch.Tensor):
                             data[i] = data[i].cuda()
                     (imgs, metas, label) = data
-                    
+
                     for k, v in metas[0].items():
                         if not (k in metas_tensor_keys_inv):
                             metas[0][k] = torch.tensor(v).cuda()
@@ -440,7 +460,7 @@ def main(args):
                     voxel_label[voxel_label == 12] = 0
 
                     CalMeanIou.add_batch(voxel_predict, voxel_label)
-                                        
+
                     gc.collect()
                     torch.cuda.empty_cache()
 
@@ -453,7 +473,7 @@ def main(args):
             logger.info(f'Current val iou of sem_cls is {info_sem_cls}')
             logger.info(f'Current val iou of sem is {info_sem}')
             logger.info(f'Current val iou of geo is {info_geo}')
-        
+
 
 if __name__ == '__main__':
     # Training settings

@@ -323,7 +323,13 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
                 'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
             }
             depthanything = DepthAnythingV2(**{**model_configs['vitb'], 'max_depth':20})
-            checkpoint = torch.load(f"{os.getenv('HF_HOME', os.path.expanduser('~') + '/.cache/huggingface')}/hub/EmbodiedOcc/finetune_scannet_depthanythingv2.pth", map_location='cpu')['model']
+            # ==================================================#
+            # 预训练权重路径！
+            # checkpoint = torch.load(f"{os.getenv('HF_HOME', os.path.expanduser('~') + '/.cache/huggingface')}/hub/EmbodiedOcc/finetune_scannet_depthanythingv2.pth", map_location='cpu')['model']
+            checkpoint = torch.load(
+                f"/c20250502/wangyushen/Weights/gpocc/finetune_scannet_depthanythingv2.pth",
+                map_location="cpu",
+            )["model"]
             new_state_dict = {}
             for k, v in checkpoint.items():
                 if k.startswith('module.'):
@@ -343,18 +349,20 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
 
         else:
             from gpocc.model.vggt.models.vggt import VGGT
-
-            pretrained_path = f"{os.getenv('HF_HOME', os.path.expanduser('~') + '/.cache/huggingface')}/hub/VGGT-1B"
+            # ==================================================#
+            # 预训练权重路径！
+            # pretrained_path = f"{os.getenv('HF_HOME', os.path.expanduser('~') + '/.cache/huggingface')}/hub/VGGT-1B"
+            pretrained_path = f"/c20250502/wangyushen/Weights/vggt/VGGT-1B"
 
             model = VGGT.from_pretrained(pretrained_path)
             self.backbone = model
 
-            _module_require_grad(self.backbone, False)
+            _module_require_grad(self.backbone, False) # 冻结权重
 
             if not frozen_backbone:
                 _module_require_grad(self.backbone.aggregator, True)
 
-            self.freeze_blocks = freeze_blocks
+            self.freeze_blocks = freeze_blocks # 0
             if freeze_blocks > 0:
                 assert not frozen_backbone
                 for idx in range(freeze_blocks):
@@ -363,11 +371,11 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
                     _module_require_grad(
                         self.backbone.aggregator.global_blocks[idx], True)
 
-            self.gs_head = copy.deepcopy(self.backbone.depth_head)
+            self.gs_head = copy.deepcopy(self.backbone.depth_head) # 保持 depth_head可学习
             for n, p in self.gs_head.named_parameters():
                 p.requires_grad = True
 
-            self.backbone.depth_head = None
+            self.backbone.depth_head = None     # 只保留vggt主干
             self.backbone.camera_head = None
             self.backbone.point_head = None
             self.backbone.track_head = None
@@ -379,12 +387,12 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
         self.scale_range = scale_range
         self.include_opa = include_opa
         self.semantic_dim = semantic_dim
-        self.semantic_start = 10 + int(include_opa)
+        self.semantic_start = 10 + int(include_opa) # 11
 
         self.cuda_kwargs = cuda_kwargs
 
         from gpocc.model.head.gaussian_occ_head.ops.localagg_prob_gf2.local_aggregate_prob_gf2 import LocalAggregator
-        self.aggregator = LocalAggregator(**cuda_kwargs)
+        self.aggregator = LocalAggregator(**cuda_kwargs) # scale_multiplier:3 HWD=[60 60 36] pc_min=[-51.2 -51.2 -5.0]
 
         _dim_ = 256
         self.gs_pred_layer = nn.Sequential(
@@ -397,19 +405,19 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
             nn.Conv2d(64 if self.use_depthanything else 128, _dim_, kernel_size=2, stride=2),
             nn.ReLU(),
             nn.Conv2d(_dim_, _dim_, kernel_size=2, stride=2),
-        )
+        )   # 空间尺寸缩小4倍
         self.anchor_depth_pred = nn.Sequential(
             nn.Conv2d(_dim_, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 1, kernel_size=1, stride=1, padding=0),
-        )
+        )   # 不改变空间尺寸, 通道数最终压成1
 
-        self.num_bins = num_bins
+        self.num_bins = num_bins # 16
         if num_bins > 0:
             self.bins_emb = nn.Embedding(num_bins, _dim_)
             self.depth_scale_layer = nn.Conv2d(_dim_, 1, kernel_size=1)
 
-        self.opacities_threshold = opacities_threshold
+        self.opacities_threshold = opacities_threshold # 0.01
         self.densities_threshold = densities_threshold
 
         if densities_threshold is not None:
@@ -469,11 +477,11 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
             return output
         else:
             aggregated_tokens_list, patch_start_idx = self.backbone.aggregator(
-                images=imgs,
+                images=imgs,    # (1 1 3 392 518)
                 freeze_blocks=None if self.frozen_backbone else self.freeze_blocks,
                 extra_feat=extra_feat)
-            predictions['aggregated_tokens_list'] = aggregated_tokens_list
-            predictions['patch_start_idx'] = patch_start_idx
+            predictions['aggregated_tokens_list'] = aggregated_tokens_list # 24:(1 1 1041 2048)
+            predictions['patch_start_idx'] = patch_start_idx    # 5
 
             return predictions
 
@@ -530,38 +538,37 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
 
         assert imgs.shape[2] == 1, f'#view == 1, but got {imgs.shape[2]}'
         imgs = imgs.squeeze(2)
-        imgs = rearrange(imgs, 'b f h w c -> b f c h w')
+        imgs = rearrange(imgs, 'b f h w c -> b f c h w')    # (1 1 3 392 518)
 
-        nyu_pc_min = torch.stack([meta['vox_origin'] for meta in metas]).cuda()
-        scene_size = torch.stack([meta['scene_size'] for meta in metas]).cuda()
+        nyu_pc_min = torch.stack([meta['vox_origin'] for meta in metas]).cuda() # (1 3)
+        scene_size = torch.stack([meta['scene_size'] for meta in metas]).cuda() # (1 3)
         nyu_pc_max = nyu_pc_min + scene_size
 
-        sampled_xyz = torch.stack([meta['occ_xyz'] if isinstance(meta['occ_xyz'], torch.Tensor) else torch.from_numpy(meta['occ_xyz']).cuda() for meta in metas])
-
-
-        if self.frozen_backbone:
+        sampled_xyz = torch.stack([meta['occ_xyz'] if isinstance(meta['occ_xyz'], torch.Tensor) else torch.from_numpy(meta['occ_xyz']).cuda() for meta in metas]) # (1 60 60 36 3)
+        # 使用vggt的backbone提取24层token特征
+        if self.frozen_backbone: # 未冻结, 全量微调vggt的方式
             with torch.no_grad():
                 self.backbone.eval()
                 predictions = self.forward_backbone(imgs, extra_feat=extra_feat)
-        else:
-            predictions = self.forward_backbone(imgs, extra_feat=extra_feat)
-
+        else:   
+            predictions = self.forward_backbone(imgs, extra_feat=extra_feat) # aggregated_token_list: 24:(1 1 1041 2048)
+        # 使用[4 11 17 23]层特征, 通过dpt head构建融合后单尺度特征
         if self.use_depthanything:
             ori_anchor_feat = self.gs_head.custom_forward(*predictions)
             ori_anchor_feat = ori_anchor_feat.unflatten(0, imgs.shape[:2])
-        else:
+        else:  # dpt head: # [4 11 17 23]
             ori_anchor_feat = self.gs_head.custom_forward(
-                predictions['aggregated_tokens_list'],
-                images=imgs,
-                patch_start_idx=predictions['patch_start_idx'],
-            )
+                predictions['aggregated_tokens_list'], # aggregated_token_list: 24:(1 1 1041 2048)  1036=28x37 -> 上采样x8 -> 392x518
+                images=imgs,    # (1 1 3 392 518)
+                patch_start_idx=predictions['patch_start_idx'], # 5
+            )   # (1 1 128 224 296)
 
-        anchor_feat = self.anchor_feat_layer(ori_anchor_feat.flatten(0, 1))
-        anchor_depth = self.anchor_depth_pred(anchor_feat)
+        anchor_feat = self.anchor_feat_layer(ori_anchor_feat.flatten(0, 1)) # (1 256 56 74)
+        anchor_depth = self.anchor_depth_pred(anchor_feat)                  # (1 1 56 74)
 
         max_depth = 8
         anchor_depth = anchor_depth.sigmoid() * max_depth  # (B, 1, H, W)
-
+        # 将每个56x74特征位置, 根据相机内参和预测深度,反投影为一个3D点
         device = anchor_depth.device
         dtype = anchor_depth.dtype
         B, _, H, W = anchor_depth.shape
@@ -587,41 +594,40 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
         dirs = torch.stack([x, y, z], dim=1)
         dirs = torch.nn.functional.normalize(dirs, dim=1, eps=1e-6)  # unit direction vectors
 
-        xyz = dirs * anchor_depth  # element-wise scale by depth
-
-        if self.num_bins > 0:
-
-            depth_scale = self.depth_scale_layer(anchor_feat).sigmoid()  # (B, num_bins, H, W)
+        xyz = dirs * anchor_depth  # element-wise scale by depth    # (1 3 56 74)
+        # 沿相机射线继续往里采样16个点
+        if self.num_bins > 0: # 16 每条ray上构造16个采样点
+            # 根据每个位置的anchor feat, 为每个bin预测一个0~1的缩放系数 这里不是固定往后采样,而是让网络根据局部特征,自适应控制每个采样点射线偏移多少
+            depth_scale = self.depth_scale_layer(anchor_feat).sigmoid()  # (1 1 56 74) # (B, num_bins, H, W)
             depth_offset = torch.linspace(
                 0, 5, self.num_bins, device=device, dtype=dtype
-            )[None, :, None, None] * depth_scale  # (B, num_bins, H, W)
+            )[None, :, None, None] * depth_scale  # 基础偏移x预测的depth_scale # (B, num_bins, H, W)
 
             dirs = dirs.unsqueeze(1).expand(-1, self.num_bins, -1, -1, -1)  # (B, num_bins, 3, H, W)
             depth_offset = depth_offset.unsqueeze(2)  # (B, num_bins, 1, H, W)
 
-            xyz_offset = xyz.unsqueeze(1) + dirs * depth_offset  # (B, num_bins, 3, H, W)
+            xyz_offset = xyz.unsqueeze(1) + dirs * depth_offset  # (1 16 3 56 74) # (B, num_bins, 3, H, W) 一个surface point -> 16个沿ray的采样点和相应特征
 
-            anchor_feat_offset = anchor_feat.unsqueeze(1) + self.bins_emb.weight[None, :, :, None, None]
-
+            anchor_feat_offset = anchor_feat.unsqueeze(1) + self.bins_emb.weight[None, :, :, None, None]    # (1 16 256 56 74) # self.bins_emb: (16 256) 每条射线专属的可学习嵌入
         else:
             xyz_offset = xyz[:, None]
             anchor_feat_offset = anchor_feat[:, None]
 
-        xyz = rearrange(xyz_offset, 'b n c h w -> b (n h w) c')
-        feat = rearrange(anchor_feat_offset, 'b n c h w -> b (n h w) c')
-        gs_feat = self.gs_pred_layer(feat)
+        xyz = rearrange(xyz_offset, 'b n c h w -> b (n h w) c')             # (1 1 3 56 74) -> (1 66304 3)
+        feat = rearrange(anchor_feat_offset, 'b n c h w -> b (n h w) c')    # (1 1 256 56 74) -> (1 66304 256)
+        gs_feat = self.gs_pred_layer(feat)                                  # (1 66304 20)
 
-        if self.deform_offset:
+        if self.deform_offset: # False
             assert False, 'not good'
             deform_offset = self.deform_offset_layer(feat)
             xyz = xyz + deform_offset
 
         gs_scales = safe_sigmoid(gs_feat[..., :3])
-        gs_scales = self.scale_range[0] + (self.scale_range[1] - self.scale_range[0]) * gs_scales
-        rot = gs_feat[..., 3:7]
-        opas = safe_sigmoid(gs_feat[..., 7:8])
-        shs = torch.zeros(*gs_feat.shape[:-1], 0, device=device, dtype=dtype)
-        semantics = gs_feat[..., 8 : 8 + self.semantic_dim]
+        gs_scales = self.scale_range[0] + (self.scale_range[1] - self.scale_range[0]) * gs_scales   # (1 66304 3)
+        rot = gs_feat[..., 3:7]                                                                     # (1 66304 4)
+        opas = safe_sigmoid(gs_feat[..., 7:8])                                                      # (1 66304 1)
+        shs = torch.zeros(*gs_feat.shape[:-1], 0, device=device, dtype=dtype)                       # (1 66304 0)
+        semantics = gs_feat[..., 8 : 8 + self.semantic_dim]                                         # (1 66304 12)
 
         if self.with_unc:
             conf = gs_feat[..., 8 + self.semantic_dim: 8 + self.semantic_dim + 1]
@@ -649,7 +655,7 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
         sparse_labels = []
         sparse_masks = []
 
-        means, origi_opa, opacities, scales, CovInv = self.prepare_gaussian_args(gaussian, metas)
+        means, origi_opa, opacities, scales, CovInv = self.prepare_gaussian_args(gaussian, metas)   # (1 66304 3) (1 66304 1) (1 66304 12) (1 66304 3) (1 66304 3 3)
 
         semantics = []
         densities = []
@@ -657,7 +663,7 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
         fov_mask = []
         confs = []
 
-        if self.with_unc:
+        if self.with_unc: # False
             opacities = torch.cat([opacities, conf], dim=-1)
 
         for i in range(len(sampled_xyz)):
@@ -693,7 +699,7 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
                 density = torch.zeros_like(semantic[..., 0])
             else:
                 semantic, bin_logit, density = self.aggregator(
-                    sampled_xyz[i:(i+1)].flatten(1, 3),
+                    sampled_xyz[i:(i+1)].flatten(1, 3), # (1 60 60 36 3) -> (129600 3)
                     means[i][mask][None],
                     origi_opa[i][mask][None],
                     opacities[i][mask][None],
@@ -713,8 +719,8 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
 
             if self.semantic_dim == 13:
                 geosem = torch.cat([sem, geo], dim=-1)
-            else:
-                geosem = torch.cat([-10 * torch.ones_like(geo), sem, geo], dim=-1)
+            else:   # 12
+                geosem = torch.cat([-10 * torch.ones_like(geo), sem, geo], dim=-1) # (129600 13)
 
             semantics.append(geosem)
             densities.append(density)
@@ -723,8 +729,8 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
             fov_mask.append(metas[i]['fov_mask'])
 
         result_dict.update(dict(
-            depth_pred=anchor_depth,
-            depth_gt=torch.stack([meta['depth_gt'] for meta in metas]),
+            depth_pred=anchor_depth,    # (1 1 56 74)
+            depth_gt=torch.stack([meta['depth_gt'] for meta in metas]), # (1 480 640)
         ))
 
         if len(semantics):

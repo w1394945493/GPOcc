@@ -1,0 +1,23 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "train1",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py",
+            "args": [
+                "--py-config", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/mono_vggt_bin16_release_custom.py",
+                "--work-dir", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/outputs/train1",
+            ],
+            "env": {
+                "PYTHONPATH": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src:/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src/gpocc/Depth-Anything-V2/metric_depth",
+            },
+            "console": "integratedTerminal"
+        }
+    ]
+}
