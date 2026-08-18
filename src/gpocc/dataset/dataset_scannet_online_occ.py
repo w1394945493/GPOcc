@@ -30,14 +30,14 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
         num_pts=21600,
         data_tag='base',
         original_occscannet_root=None,
-        # monoocc_root='./data/occscannet',
-        occscannet_root='./data/scene_occ',
+        monoocc_root='./data/occscannet',   # occscannet
+        occscannet_root='./data/scene_occ', # embodiedocc
 
         vggt_image_preprocess=False,
     ):
         self.original_occscannet_root = original_occscannet_root
         self.occscannet_root = occscannet_root
-        # self.monoocc_root = monoocc_root
+        self.monoocc_root = monoocc_root
         self.phase = phase
         self.num_frames = num_frames
         self.grid_size_occ = grid_size_occ # local size
@@ -45,11 +45,11 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
         self.data_tag = data_tag
         self.voxel_size = 0.08  # 0.08m
         self.scene_size = (4.8, 4.8, 2.88)  # (4.8m, 4.8m, 2.88m)
-        
+
         if data_tag == 'base':
-            subscenes_list = f'{self.occscannet_root}/{self.phase}_online.txt' # scenexxxx_xx
+            subscenes_list = os.path.join(f'{self.occscannet_root}',f'{self.phase}_online.txt') # scenexxxx_xx
         elif data_tag == 'mini':
-            subscenes_list = f'{self.occscannet_root}/{self.phase}_mini_online.txt'
+            subscenes_list = os.path.join(f'{self.occscannet_root}',f'{self.phase}_mini_online.txt')
 
         with open(subscenes_list, 'r') as f:
             self.used_subscenes = f.readlines()
@@ -60,7 +60,7 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
         # self.used_subscenes = self.used_subscenes[-40:-30]
 
         # self.used_subscenes = [t for t in self.used_subscenes if '192' in t]
-        
+
         self.num_pts = num_pts
 
         self.normalize_rgb = transforms.Compose(
@@ -120,9 +120,11 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
             monometa = {}
             monometa['global_scene_origin'] = meta['global_scene_origin']
             monometa['global_scene_size'] = meta['global_scene_size']
-            
+
             rgb_path = sorted_image_paths[i]
-            rgb_path = rgb_path.replace('/data1/code/wyq/gaussianindoor/indoor-gaussian-scannet', '.')
+            # rgb_path = rgb_path.replace('/data1/code/wyq/gaussianindoor/indoor-gaussian-scannet', '.')
+            rgb_path = rgb_path.replace("/data1/code/wyq/gaussianindoor/indoor-gaussian-scannet/data/occscannet/", "")
+            rgb_path = os.path.join(self.monoocc_root, rgb_path)
 
             depth_path = rgb_path.replace('jpg', 'png')
             img_idx = rgb_path.split("/")[-1].split(".")[0] # 'xxxxx'
@@ -130,7 +132,13 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
             monometa['name'] = this_name # 'scene0000_00/00000'
 
             # 加载global2local的occ
-            my_pth = self.occscannet_root + '/streme_occ_new_package/' + self.phase + '/' + meta['scene_name'] + '_' + img_idx + '_new.pkl'
+            # my_pth = self.occscannet_root + '/streme_occ_new_package/' + self.phase + '/' + meta['scene_name'] + '_' + img_idx + '_new.pkl'
+            my_pth = os.path.join(
+                self.occscannet_root,
+                "streme_occ_new_package",
+                self.phase,
+                f"{meta['scene_name']}_{img_idx}_new.pkl",
+            )
             with open(my_pth, 'rb') as f1:
                 data1 = pickle.load(f1)
                 my_target = data1['local_label']
@@ -138,7 +146,7 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
 
             monometa['mask_in_global_from_this'] = mask_in_global_from_this
 
-            mono_pkg_pth = f'./data/occscannet/gathered_data/{this_name}.pkl'
+            mono_pkg_pth = os.path.join(self.monoocc_root, f'gathered_data/{this_name}.pkl')
             with open(mono_pkg_pth, 'rb') as f:
                 data = pickle.load(f)
             monometa['scene_size'] = self.scene_size
@@ -257,7 +265,7 @@ class Scannet_Online_SceneOcc_Dataset(data.Dataset):
 
     def get_meshgrid(self, ranges, grid, reso):
         pass
-    
+
     def get_data_info(self, info):
         pass
 

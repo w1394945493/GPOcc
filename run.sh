@@ -15,13 +15,19 @@ python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py \
     --work-dir /c20250502/wangyushen/Outputs/gpocc/mono_dpt_bin16/train1
 
 
-# EmbodiedOcc-ScanNet GPOcc仅推理
+# EmbodiedOcc-ScanNet GPOcc仅推理 vggt
 PYTHONPATH=`pwd`/src:`pwd`/src/gpocc/Depth-Anything-V2/metric_depth:$PYTHONPATH \
 python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py \
     --py-config /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_vggt_custom.py \
     --work-dir /c20250502/wangyushen/Outputs/gpocc/embodiedocc_vggt_bin16/val1 \
     --evaluate \
 
+# EmbodiedOcc-ScanNet GPOcc仅推理 dav2
+PYTHONPATH=`pwd`/src:`pwd`/src/gpocc/Depth-Anything-V2/metric_depth:$PYTHONPATH \
+python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py \
+    --py-config /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_dpt_custom.py \
+    --work-dir /c20250502/wangyushen/Outputs/gpocc/embodiedocc_dav2_bin16/val1 \
+    --evaluate \
 # ==================================================#
 # 火山引擎 多卡训练 OccScannet
 # vggt

@@ -871,7 +871,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
 
         if self.training and self.detach_global_each_frame:
             self.detach_global_gaussians()
-
+        # 调用父类，得到当前帧局部Gaussian
         result_dict, _, _ = super().forward(
             imgs=imgs,
             metas=metas,
@@ -891,12 +891,12 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             scene_size = metas[batch_idx]['scene_size'].cuda()
             cam2world = metas[batch_idx]['cam2world'].cuda()
             nyu_pc_max = nyu_pc_min + scene_size
-
+            # 将当前帧在相机坐标系下预测的gaussian，转换到世界坐标系下，方便后续跨帧累计，合并到global gaussians
             sparse_means, sparse_origi_opa, sparse_opacities, sparse_scales, sparse_rots = self.prepare_gaussian_args_v2(
                 result_dict['gaussian'], [metas[batch_idx]])
             sparse_qs = matrix_to_quaternion(sparse_rots)
 
-
+            # 测试阶段：筛选掉低opacity的gaussian
             pos_mask = (sparse_origi_opa[batch_idx] > self.opacities_threshold).squeeze(1)
 
             result_dict['gaussian'] = GaussianPrediction(
@@ -924,7 +924,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             global_result_dict = self.gaussian2pred(
                 gaussians=global_gaussians,
                 metas=[m[0] for m in scenemeta]
-            )
+            )   # gaussian 体素化
         else:
             global_result_dict = None
 

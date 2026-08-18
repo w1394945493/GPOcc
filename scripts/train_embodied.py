@@ -283,9 +283,9 @@ def main(args):
                     # reset
                     model.global_gaussians = None
 
-                for i in range(K_Frames):
-                    img = imgs[:, :, i, :, :, :].unsqueeze(2)
-                    label = labels[:, i, :, :, :].unsqueeze(1)
+                for i in range(K_Frames):   # 30
+                    img = imgs[:, :, i, :, :, :].unsqueeze(2)   # (1 1 1 392 518 3)
+                    label = labels[:, i, :, :, :].unsqueeze(1)  # (1 1 60 60 36)
 
                     model.update_global_mask(scenemetas, frame_idx=i)
 
@@ -311,7 +311,7 @@ def main(args):
                     voxel_label[voxel_label == 12] = 0
                     CalMeanIou.add_batch(voxel_predict, voxel_label)
 
-                    if not only_global:
+                    if not only_global: # False
 
                         fov_voxel_predict = result_dict['ce_input'].argmax(dim=1).long() # [1, 60, 60, 36]
                         fov_voxel_label = result_dict['ce_label'].long() # [1, 60, 60, 36]
