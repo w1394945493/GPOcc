@@ -46,13 +46,20 @@ def is_main_process():
 
 
 def main(args):
-    # global settings
+    # ====================================================================== #
+    # 1. 读取 embodied 实验配置并初始化全局运行参数
+    # ====================================================================== #
+    # 注意：该文件虽然名为 train_embodied.py，但当前只实现了 --evaluate；
+    # 不带 --evaluate 运行会在文件末尾触发 assert False。
     torch.backends.cudnn.benchmark = True
 
-    # load config
+    # py-config 应是 embodied 配置：定义 Online 模型、场景级 dataset 和全局网格。
     cfg = Config.fromfile(args.py_config)
 
-    # TODO
+    # 标准用法会额外传入训练 Mono 模型所用的 --model_config：
+    # - Online 模型仍由 embodied 的 cfg.model 构建；
+    # - 这里只从 Mono 配置同步 num_bins，保证 Gaussian head 输出维度匹配；
+    # - checkpoint 则固定取 Mono work_dir 下的 latest.pth。
     if args.model_config is not None:
         assert args.evaluate
         model_cfg = Config.fromfile(args.model_config)
@@ -69,6 +76,10 @@ def main(args):
     if args.vis_freq:
         vis_freq = args.vis_freq
 
+    # ====================================================================== #
+    # 2. 初始化单卡或 torchrun DDP 环境
+    # ====================================================================== #
+    # 以下注释块是早期强制 DDP 的实现，当前代码改为检测环境变量后自动选择。
     # # init DDP
     # distributed = True
     # world_size = int(os.environ["WORLD_SIZE"])  # number of nodes
@@ -84,6 +95,7 @@ def main(args):
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
 
     if distributed:
+        # torchrun 为每个进程提供 RANK/WORLD_SIZE/LOCAL_RANK；每个 rank 绑定一张卡。
         world_size = int(os.environ["WORLD_SIZE"])
         rank = int(os.environ["RANK"])
         gpu = int(os.environ["LOCAL_RANK"])
@@ -94,6 +106,7 @@ def main(args):
             backend="nccl", init_method="env://", world_size=world_size, rank=rank
         )
     else:
+        # 普通 python 启动默认使用 cuda:0。
         world_size = 1
         rank = 0
         gpu = 0
@@ -103,7 +116,10 @@ def main(args):
             import builtins
             builtins.print = pass_print
 
-    # configure logger
+    # ====================================================================== #
+    # 3. 创建工作目录、保存最终配置并初始化日志
+    # ====================================================================== #
+    # 只让 rank 0 创建目录和 dump 配置，避免多进程并发写同一文件。
     if is_main_process():
         os.makedirs(args.work_dir, exist_ok=True)
         cfg.dump(osp.join(args.work_dir, osp.basename(args.py_config)))
@@ -118,18 +134,23 @@ def main(args):
         log_level='INFO')
     logger.info(f'Config:\n{cfg.pretty_text}')
 
-    # build model
+    # ====================================================================== #
+    # 4. 构建带跨帧状态的 Online Gaussian OCC 模型
+    # ====================================================================== #
     from gpocc.model import build_model
     my_model = build_model(cfg.model)
 
     if cfg.flag_depthanything_as_gt:
+        # 旧独立深度辅助分支开关；当前 release/custom 配置通常关闭。
         my_model.depthanything.requires_grad_(False)
     if hasattr(my_model, 'globalhead'):
+        # 兼容旧 Online 模型实现；当前 VGGTGaussianSegmentorOnline 通常没有该 head。
         my_model.globalhead.requires_grad_(False)
     n_parameters = sum(p.numel() for p in my_model.parameters() if p.requires_grad)
     logger.info(f'Number of params: {n_parameters}')
     # logger.info(f'Model:\n{my_model}')
     if distributed:
+        # DDP 只负责并行不同场景；同一场景内部的帧仍在单个 rank 上按顺序处理。
         find_unused_parameters = cfg.get('find_unused_parameters', True)
         if cfg.get('track_running_stats', False):
             my_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(my_model)
@@ -142,11 +163,18 @@ def main(args):
     else:
         my_model = my_model.cuda()
 
-    # ================================================#
+    # 后续需要调用 scene_init/update_global_mask 等 Online 专用方法；DDP 包装后
+    # 这些方法位于 my_model.module，因此保留一份解包后的 model 引用。
     model = my_model.module if distributed else my_model
 
     logger.info('done ddp model')
-    # build dataloader
+
+    # ====================================================================== #
+    # 5. 构建场景级 Dataset、Wrapper 和 DataLoader
+    # ====================================================================== #
+    # 与 Mono 的“一条数据=一帧”不同，Online dataset 的“一条数据=一个场景”：
+    # imgs/labels 包含场景的连续帧，meta['monometa_list'] 保存逐帧相机信息，
+    # meta 还包含 global_pts/global_labels/global_scene_origin 等全局体素信息。
     from gpocc.dataset import build_dataloader
     train_dataset_loader, val_dataset_loader = \
         build_dataloader(
@@ -159,6 +187,9 @@ def main(args):
             dist=distributed,
         )
 
+    # ====================================================================== #
+    # 6. 确定 resume/load checkpoint 来源
+    # ====================================================================== #
     cfg.resume_from = ''
     if osp.exists(osp.join(args.work_dir, 'latest.pth')):
         cfg.resume_from = osp.join(args.work_dir, 'latest.pth')
@@ -168,13 +199,15 @@ def main(args):
     logger.info(f'resume from: {cfg.resume_from}')
     logger.info(f'work dir: {args.work_dir}')
 
+    # 控制评估 forward 是否使用 autocast；很多 release 配置为了数值稳定设为 False。
     amp = cfg.get('amp', True)
 
     if not args.evaluate:
         # try post init weight for online model
         # my_model.module.post_init_weight()
 
-        # get optimizer, loss, scheduler
+        # 这是尚未完成的 embodied 训练准备代码。虽然会创建 optimizer/loss，
+        # 但脚本后面没有训练循环，最终会 assert False，当前不可用于训练。
         logger.info(f"Build optimizer and metrics")
         optimizer = build_optim_wrapper(my_model, cfg.optimizer_wrapper)
         scaler = torch.cuda.amp.GradScaler(enabled=amp)
@@ -189,13 +222,16 @@ def main(args):
             t_in_epochs=False
         )
 
-    # resume and load
+    # ====================================================================== #
+    # 7. 加载模型或完整训练状态
+    # ====================================================================== #
     epoch = 0
     best_val_iou = 0
     best_val_miou = 0
     global_iter = 0
 
     if not args.evaluate and cfg.resume_from and osp.exists(cfg.resume_from):
+        # 仅预留给未完成的训练模式：恢复模型、optimizer、scheduler 和计数器。
         map_location = 'cpu'
         ckpt = torch.load(cfg.resume_from, map_location=map_location)
         logger.info(my_model.load_state_dict(revise_ckpt(ckpt['state_dict']), strict=False))
@@ -209,12 +245,16 @@ def main(args):
         global_iter = ckpt['global_iter']
         logger.info(f'successfully resumed from epoch {epoch}')
     elif cfg.load_from:
+        # embodied 评估走该分支：把训练好的 Mono 权重以 strict=False 加载到
+        # Online 模型。Online 新增的全局状态/聚合模块允许不存在对应 checkpoint key。
         logger.info(f"Load from {cfg.load_from}, ret:")
         ckpt = torch.load(cfg.load_from, map_location='cpu')
         if 'state_dict' in ckpt:
             state_dict = ckpt['state_dict']
         else:
             state_dict = ckpt
+        # checkpoint 是否带 module. 前缀取决于保存时是否使用 DDP；按当前运行模式
+        # 调整 key，若第一次加载仍不匹配，再用 revise_ckpt_2 兼容旧命名。
         if not distributed:
             state_dict = revise_ckpt_notddp(state_dict)
         else:
@@ -234,6 +274,7 @@ def main(args):
     CalMeanIou_Fov = SSCMetricsTorch(n_classes=12)
     CalMeanIou_Global = SSCMetricsTorch(n_classes=12)
 
+    # 这些字段描述完整场景而非某一帧，进入模型前统一转成 CUDA Tensor。
     scenemeta_keys = ['global_scene_dim', 'global_scene_size', 'global_labels', 'global_pts', 'global_scene_origin', 'global_mask']
     metas_tensor_keys_inv = ['name', 'cam2img', 'world2img', 'rgb_path', 'depth_path','num_depth', 'occ_mask_valid', 'img_shape', 'img_aug_matrix', 'img_depthbranch']
 
@@ -242,6 +283,11 @@ def main(args):
     only_global = False
 
     if args.evaluate:
+        # ================================================================== #
+        # 8. Embodied streaming/incremental fusion 评估
+        # ================================================================== #
+        # 评估单位是场景：每个场景按时间顺序输入 K 帧；模型在
+        # self.global_gaussians 中累计地图，每帧都可输出当前全局 OCC。
         my_model.eval()
         CalMeanIou.reset()
         CalMeanIou_Fov.reset()
@@ -249,6 +295,7 @@ def main(args):
         np.set_printoptions(formatter={'float': '{: 0.3f}'.format})
 
         if args.vis or args.save:
+            # 当前代码只创建目录，后续没有真正写出可视化/预测文件；属于未完成接口。
             save_dir_occ = os.path.join(args.work_dir, 'vis_occ_occupancy')
             os.makedirs(save_dir_occ, exist_ok=True)
             save_dir_gauss = os.path.join(args.work_dir, 'vis_occ_gaussian')
@@ -269,9 +316,15 @@ def main(args):
                 CalMeanIou.reset()
 
                 for i in range(len(data)):
+                    # custom_collate_fn 返回 list；仅顶层 Tensor 在这里直接搬到 GPU。
                     if isinstance(data[i], torch.Tensor):
                         data[i] = data[i].cuda()
                 (imgs, metas, labels) = data
+
+                # 典型 batch_size=1：
+                # imgs   ≈ [B, 1, K, H, W, C]（单相机槽位、K 个连续帧）
+                # labels ≈ [B, K, 60, 60, 36]
+                # metas  是长度 B 的场景字典列表。
 
                 vis_data = []
                 if args.vis or args.save:
@@ -282,9 +335,13 @@ def main(args):
 
                 for k, v in metas[0].items():
                     if k in scenemeta_keys:
+                        # build_dataloader 的 collate 对 dict 保持 list；这里逐场景转换
+                        # 全局标签、坐标、原点、尺寸和 mask，供 scene_init 使用。
                         for meta in metas:
                             meta[k] = torch.tensor(meta[k]).cuda()
 
+                # monometa_list[k] 保存第 k 帧的 cam2world、局部 vox_origin、
+                # occ_xyz、fov_mask 及其映射到全局网格的 mask。
                 K_Frames = len(metas[0]['monometa_list'])
                 scenemetas = [meta['monometa_list'] for meta in metas]
 
@@ -296,7 +353,8 @@ def main(args):
 
                 # 按时间顺序逐帧推理；每次 forward 都会把当前帧 Gaussian 融入
                 # model.global_gaussians，因此不能打乱同一场景中的帧顺序。
-                for i in range(K_Frames):   # 30
+                for i in range(K_Frames):   # 通常约 30 帧，以场景包实际长度为准
+                    # 从场景 batch 中切出当前第 i 帧；Online forward 当前只支持单帧输入。
                     img = imgs[:, :, i, :, :, :].unsqueeze(2)   # (1 1 1 392 518 3)
                     label = labels[:, i, :, :, :].unsqueeze(1)  # (1 1 60 60 36)
 
@@ -318,6 +376,11 @@ def main(args):
                             grad_frames=cfg.grad_frames,
                             test_mode=False,
                             only_global=only_global)
+
+                    # forward 内部完成：
+                    # 当前图像 -> 局部 Gaussian -> 相机坐标转世界坐标
+                    # -> 与历史 global_gaussians 做半径匹配/融合
+                    # -> 将全部全局 Gaussian splat 到场景级体素网格。
 
                     # ---------------- 逐帧全局 OCC 评估 ----------------
                     # ce_input[0] 的形状为 [C, X_global, Y_global, Z_global]，对类别维
@@ -391,6 +454,7 @@ def main(args):
 
                         CalMeanIou_Global.add_batch(voxel_predict, voxel_label)
 
+                        # Online 实现的评估路径明确只支持 batch_size=1。
                         assert len(model.global_gaussians) == 1, 'only support bs=1'
 
                 if i_iter_val % print_freq == 0 and is_main_process():
@@ -418,6 +482,7 @@ def main(args):
                 logger.info(f'Final global iou of geo is {global_geo}')
         return
     else:
+        # embodied 训练循环尚未实现；避免用户误以为前面构建 optimizer 后会训练。
         assert False
 
 if __name__ == '__main__':
