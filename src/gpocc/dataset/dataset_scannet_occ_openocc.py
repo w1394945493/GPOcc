@@ -75,6 +75,14 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         return len(self.used_subscenes)
 
     def __getitem__(self, index):
+        # 图像处理分成两条互相独立的路径：
+        #
+        # A. img_depthbranch：固定缩放到 640x480，再经过 DepthAnything 风格的
+        #    Resize + ImageNet Normalize + CHW 转换，保存在 meta 中供旧深度
+        #    辅助分支使用；它不是主 OCC backbone 的 imgs。
+        # B. imgs：从原始彩色图像读出，根据 vggt_image_preprocess 决定尺寸，保持
+        #    uint/float 的 HWC、0~255 格式返回；随后由 DatasetWrapper 做训练
+        #    颜色增强、除以 255 和 Tensor 转换，最后送入 VGGT/DPT OCC backbone。
         name = self.used_subscenes[index]
         with open(name, 'rb') as f:
             data = pickle.load(f)
@@ -95,6 +103,9 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         depth_gt_np = Image.open(depth_path).convert('I;16')
         depth_gt_np = np.array(depth_gt_np) / 1000.0
 
+        # ---------------- A. 深度辅助分支图像 ----------------
+        # 这套 transform 的 NormalizeImage/PrepareForNet 只作用于
+        # img_depthbranch，不会作用到最终返回的主图像 imgs。
         transform = Compose([
             Resize(
                 width=480,
@@ -108,9 +119,17 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
             NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             PrepareForNet(),
         ])
+        # cv2 以 BGR 读取；第一次 resize 先强制得到 640x480（宽x高），
+        # 随后转成 RGB 和 [0,1]。
         img_depthbranch = cv2.imread(rgb_path)
         img_depthbranch = cv2.resize(img_depthbranch, (640, 480), interpolation=cv2.INTER_NEAREST)
         img_depthbranch = cv2.cvtColor(img_depthbranch, cv2.COLOR_BGR2RGB) / 255.0
+        # 第二次 resize 是上面 transform 中的 Resize：以 480x480 为尺寸下界，
+        # 尽量保持纵横比，并把宽高分别约束到 14 的倍数。按当前取整实现，
+        # 输入 640x480 会得到 644x490（宽x高），所以最终并非 640x480。
+        # resize_target=False 表示这次只缩放 image，不同步缩放传入的 depth。
+        # 随后 NormalizeImage 执行 ImageNet mean/std 归一化，PrepareForNet
+        # 再把 image 从 HWC 转成 CHW。
         sample = transform({
             'image': img_depthbranch,
             'depth': depth_gt_np
@@ -123,14 +142,22 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         meta['img_depthbranch'] = img_depthbranch
         meta['depth_gt_np_valid'] = depth_gt_np
         meta['rgb_path'] = rgb_path
+
+        # ---------------- B. 主 OCC backbone 图像 ----------------
+        # mmcv.imread(..., 'unchanged') 读取主图像，当前仍为 HWC、0~255。
+        # 此处没有显式 BGR->RGB，也不做 ImageNet mean/std 归一化；颜色顺序
+        # 和归一化策略是否符合 backbone 预期，需要由当前模型管线自行保证。
         N_img = []
         this_img = imread(rgb_path, 'unchanged').astype(np.float32)
         this_H, this_W, _ = this_img.shape
 
-        # resize
+        # 第 1 步：确定主图像送入 wrapper 前的空间尺寸。
         if not self.vggt_image_preprocess:
+            # 普通分支：直接使用配置给定的 new_H/new_W（默认 480x640）。
             new_H, new_W = self.new_H, self.new_W
         else:
+            # VGGT/DPT 新分支：保持纵横比，把长边缩放到 518，并把短边四舍五入
+            # 到 14 的倍数，以适配 ViT patch size=14。这里只支持无需 crop 的情况。
             target_size = 518
             if this_W >= this_H:
                 new_width = target_size
@@ -141,11 +168,14 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
             new_W, new_H = new_width, new_height
             assert new_height < target_size, 'need crop, not implemented for now'
 
+        # 第 2 步：真正 resize 主图像，并同步缩放相机内参。
         new_img = cv2.resize(this_img, (new_W, new_H), interpolation=cv2.INTER_CUBIC)
         W_factor = new_W / this_W
         H_factor = new_H / this_H
         this_H, this_W = new_H, new_W
 
+        # N 是相机视角维；当前单目数据只有一个视角。再额外包一层 F 帧维，
+        # 因而 img 的逻辑形状为 [F=1, N=1, H, W, C]。
         N_img.append(new_img)
         img = np.stack(N_img, 0) # [1, 968, 1296, 3]
         img = [img] # [1, 1, 968, 1296, 3]
@@ -243,6 +273,8 @@ class Scannet_Scene_OpenOccupancy_Dataset(data.Dataset):
         meta['occ_mask_valid_fov'] = (occ != 0) & fov_mask
         meta['label'] = occ
 
+        # 此处仍为 HWC、float32、数值约 0~255；尚未除以 255，也没有转 Tensor。
+        # _VGGT wrapper 会继续处理为 [F,N,H,W,C] 的 [0,1] Tensor。
         imgs = np.stack(img, 0) # (1 1 392 518 3) 长边保持为518
         occs = np.stack(occ, 0) # (1 60 60 36)
         data_tuple = (imgs, meta, occs)

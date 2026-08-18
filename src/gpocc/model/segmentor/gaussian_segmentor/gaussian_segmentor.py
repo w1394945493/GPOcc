@@ -76,7 +76,7 @@ class GaussianSegmentor(BaseModule):
         lifter=None,
         encoder=None,
         future_decoder=None,
-        head=None, 
+        head=None,
         init_cfg=None,
         **kwargs,
     ):
@@ -96,7 +96,7 @@ class GaussianSegmentor(BaseModule):
                 new_state_dict = {}
                 for k, v in checkpoint.items():
                     if k.startswith('module.'):
-                        new_key = k[len('module.'):] 
+                        new_key = k[len('module.'):]
                     else:
                         new_key = k
                     new_state_dict[new_key] = v
@@ -128,7 +128,7 @@ class GaussianSegmentor(BaseModule):
             self.lifter = MODELS.build(lifter)
         if encoder is not None:
             self.encoder = MODELS.build(encoder)
-        if future_decoder is not None: 
+        if future_decoder is not None:
             self.future_decoder = MODELS.build(future_decoder)
         if head is not None:
             self.head = MODELS.build(head)
@@ -136,7 +136,7 @@ class GaussianSegmentor(BaseModule):
     def extract_img_feat(self, imgs):
         B, N, C, H, W = imgs.size()
         imgs = imgs.reshape(B * N, C, H, W) # 1, 3, 480, 640
-        
+
         feature_x = [imgs]
         feature_idx = 0
         this_x = feature_x[-1]
@@ -152,7 +152,7 @@ class GaussianSegmentor(BaseModule):
                 feature_idx += 1
                 if feature_idx in [4, 5, 6, 8, 11]:
                     feature_x.append(this_x)
-            
+
         img_feats_backbone = feature_x
 
         img_feats_out = self.neck(img_feats_backbone) # dict
@@ -177,12 +177,12 @@ class GaussianSegmentor(BaseModule):
                 image_ = metas[0]['img_depthbranch']
                 depth_pred = self.depthanything.infer_image(image_, 480, 640, 480)
                 depthnet_output = depth_pred
-            else:  
+            else:
                 depthnet_output = None
         else:
             depthnet_output = None
 
-        anchor, instance_feature, depth2occ, depthnet_output_loss, predtoreturn = self.lifter(self.flag_depthbranch, self.flag_depthanything_as_gt, depthnet_output, mlvl_img_feats, metas)    # b, g, c 
+        anchor, instance_feature, depth2occ, depthnet_output_loss, predtoreturn = self.lifter(self.flag_depthbranch, self.flag_depthanything_as_gt, depthnet_output, mlvl_img_feats, metas)    # b, g, c
 
         anchor, feats = self.encoder(anchor, instance_feature, mlvl_img_feats, metas) # b, g, c
         return anchor, depth2occ, depthnet_output_loss, predtoreturn, feats
@@ -226,7 +226,7 @@ class GaussianSegmentor(BaseModule):
             bev_feat=bev_predict,  # [1, 1, 21600, 24]
             points=points,
             label=label,
-            output_dict=output_dict, 
+            output_dict=output_dict,
             metas=metas,
             inst_feats=feats,
             test_mode=test_mode)
@@ -250,7 +250,7 @@ class GaussianSegmentor(BaseModule):
             meta_no_grad['img_aug_matrix'] = img_aug_matrix[index[grad_frames:]]
 
         return imgs_grad, metas_grad, imgs_no_grad, metas_no_grad, inv_index
-    
+
     def forward_autoreg(self,
                         imgs=None,
                         metas=None,
@@ -269,10 +269,10 @@ class GaussianSegmentor(BaseModule):
         output_dict = self.future_decoder.forward_autoreg(bev, metas)
         bev_predict = output_dict.pop('bev')
         output_dict = self.head(
-            bev_feat=bev_predict, 
-            points=points, 
-            label=label, 
-            output_dict=output_dict, 
+            bev_feat=bev_predict,
+            points=points,
+            label=label,
+            output_dict=output_dict,
             metas=metas,
             test_mode=test_mode)
 
@@ -550,7 +550,7 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
             with torch.no_grad():
                 self.backbone.eval()
                 predictions = self.forward_backbone(imgs, extra_feat=extra_feat)
-        else:   
+        else:
             predictions = self.forward_backbone(imgs, extra_feat=extra_feat) # vggt: aggregated_token_list: 24:(1 1 1041 2048)
         # 使用[4 11 17 23]层特征, 通过dpt head构建融合后单尺度特征
         if self.use_depthanything:
@@ -804,7 +804,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
         self.weight_use_p = weight_use_p
         self.weight_use_t = weight_use_t
         self.merge_scale_v2 = merge_scale_v2
-        
+
         self.use_diff_merge = use_diff_merge
         self.train_global_pred = train_global_pred
         self.detach_global_each_frame = detach_global_each_frame
@@ -929,7 +929,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
         else:
             mask = None
 
-        # 3. 维护跨帧全局 Gaussian 地图。
+        # 3. 维护跨帧全局 Gaussian 地图。 将新旧gaussian融合
         if frame_idx > 0:
             # 后续帧：依据空间距离寻找新旧 Gaussian 邻居，并对位置、语义、
             # scale、opacity 和 rotation 做规则式加权融合；未匹配项直接保留。
@@ -1103,6 +1103,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
 
     def add_gaussian_nonlearnable(self, gaussian=None, frame_idx=0, scenemetas=None, global_gaussians=None, mask=None):
 
+        # 该融合器不通过网络学习匹配关系，而是仅依据世界坐标系下 Gaussian
+        # 中心的欧氏距离建立半径邻接，再对同一邻域中的属性做加权平均。
         dist_thresh = self.merge_kernel_dist_thresh
 
         if radius is None:
@@ -1122,6 +1124,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
 
         for batch_idx in range(batch_size):
 
+            # A：此前所有帧累计得到的历史全局 Gaussian 地图。
             xyz_A = global_gaussians[batch_idx].means.squeeze(0)
             conf_A = global_gaussians[batch_idx].conf.squeeze(0) if global_gaussians[batch_idx].conf else None
             sem_A = global_gaussians[batch_idx].semantics.squeeze(0)
@@ -1129,6 +1132,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             rot_A   = global_gaussians[batch_idx].rotations.squeeze(0)
             opa_A   = global_gaussians[batch_idx].opacities.squeeze(0)
 
+            # B：当前帧预测并已变换到世界坐标系的 Gaussian。先过滤低 opacity
+            # 候选，避免不可靠 Gaussian 进入匹配或作为新地图元素被保留。
             pos_mask = (gaussian.opacities[batch_idx] > self.opacities_threshold).squeeze(1)
 
             xyz_B = gaussian.means[batch_idx][pos_mask]
@@ -1142,6 +1147,11 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             pos_A = xyz_A.view(-1, 3)  # [N, 3]
             pos_B = xyz_B.view(-1, 3)  # [M, 3]
 
+            # 仅按中心距离匹配：若 ||A_i-B_j||_2 < dist_thresh，就建立一条
+            # 邻接边。idx_A[k] 和 idx_B[k] 表示第 k 对匹配的历史/当前索引。
+            # 这是半径邻域聚合而非一对一匹配：一个 A 最多关联
+            # max_num_neighbors 个 B，一个 B 也可能出现在多个 A 的邻域中。
+            # 语义、scale、rotation 等属性不参与“是否匹配”的判定。
             idx_A, idx_B = radius(pos_B, pos_A, r=dist_thresh, max_num_neighbors=self.max_num_neighbors)
 
             def conf_act(c):
@@ -1149,6 +1159,7 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
 
             xyz_b = pos_B[idx_B]
             sem_b = sem_B[idx_B]
+            # 所有至少匹配到一个新 Gaussian 的历史 A，后面将被融合结果替换。
             merged_A_idx = torch.unique(idx_A)
 
             if conf_B is None:
@@ -1178,6 +1189,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
                 return pmax.clamp(0.0, 1.0)
 
             if self.weight_use_p:
+                # 可选：匹配完成后，根据语义最大类别概率调整融合权重。
+                # 该置信度只影响“怎么融合”，不会改变上面的空间匹配关系。
                 prob_B = _pmax_weight_from_logits(sem_B[idx_B])
                 prob_A = _pmax_weight_from_logits(sem_A[merged_A_idx])
 
@@ -1185,6 +1198,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
                 conf_a = conf_a * prob_A
 
             if self.weight_use_t:
+                # 可选时间权重：gamma 给历史 A，1-gamma 给当前帧 B。
+                # temporal_alpha 越小，融合结果越偏向当前帧的新观测。
                 gamma = float(getattr(self, "temporal_alpha", 0.1))  # =EMA的γ
                 conf_a = conf_a * gamma            # 旧(A)占γ
                 conf_b = conf_b * (1.0 - gamma)    # 新(B)占(1-γ)
@@ -1194,6 +1209,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             conf_sum = conf_sum[merged_A_idx] + conf_a
 
             weighted_xyz_b = xyz_b * conf_b
+            # scatter_add 将所有指向同一 A 的 B 汇总，从而支持一个历史
+            # Gaussian 同时吸收多个当前帧邻居。
             agg_xyz = torch_scatter.scatter_add(
                 weighted_xyz_b, idx_A, dim=0, dim_size=xyz_A.size(0))
             merged_xyz = (agg_xyz[merged_A_idx] + xyz_A[merged_A_idx] * conf_a) / conf_sum
@@ -1214,6 +1231,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
 
             q_ref_pairs = rot_A[idx_A]
             q_b = rot_B[idx_B]
+            # 四元数 q 和 -q 表示同一个旋转；加权平均前先统一符号，避免
+            # 等价旋转因符号相反而互相抵消，最后再归一化为单位四元数。
             dot = (q_b * q_ref_pairs).sum(dim=-1, keepdim=True)
             q_b_aligned = torch.where(dot < 0, -q_b, q_b)
 
@@ -1226,9 +1245,12 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             used_B_idx = torch.unique(idx_B)
             keep_A = torch.ones(xyz_A.shape[0], dtype=torch.bool, device=xyz_A.device)
             keep_B = torch.ones(xyz_B.shape[0], dtype=torch.bool, device=xyz_B.device)
+            # 已参与融合的 A/B 不再原样追加；未匹配 A 保留历史地图内容，
+            # 未匹配 B 作为当前帧发现的新 Gaussian 加入全局地图。
             keep_A[merged_A_idx] = False
             keep_B[used_B_idx] = False
 
+            # 新全局地图 = 融合结果 + 未匹配的历史 A + 未匹配的当前 B。
             final_xyz = torch.cat([merged_xyz, xyz_A[keep_A], xyz_B_in_A[keep_B]], dim=0)[None]  # [1, N, 3]
             final_sem = torch.cat([merged_sem, sem_A[keep_A], sem_B[keep_B]], dim=0)[None]  # [1, N, C]
             final_scale = torch.cat([merged_scale, scale_A[keep_A], scale_B[keep_B]], dim=0)[None]
