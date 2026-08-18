@@ -551,11 +551,11 @@ class VGGTGaussianSegmentor(GaussianSegmentor):
                 self.backbone.eval()
                 predictions = self.forward_backbone(imgs, extra_feat=extra_feat)
         else:   
-            predictions = self.forward_backbone(imgs, extra_feat=extra_feat) # aggregated_token_list: 24:(1 1 1041 2048)
+            predictions = self.forward_backbone(imgs, extra_feat=extra_feat) # vggt: aggregated_token_list: 24:(1 1 1041 2048)
         # 使用[4 11 17 23]层特征, 通过dpt head构建融合后单尺度特征
         if self.use_depthanything:
-            ori_anchor_feat = self.gs_head.custom_forward(*predictions)
-            ori_anchor_feat = ori_anchor_feat.unflatten(0, imgs.shape[:2])
+            ori_anchor_feat = self.gs_head.custom_forward(*predictions)     # (1 64 224 296)
+            ori_anchor_feat = ori_anchor_feat.unflatten(0, imgs.shape[:2])  # (1 1 64 224 296)
         else:  # dpt head: # [4 11 17 23]
             ori_anchor_feat = self.gs_head.custom_forward(
                 predictions['aggregated_tokens_list'], # aggregated_token_list: 24:(1 1 1041 2048)  1036=28x37 -> 上采样x8 -> 392x518

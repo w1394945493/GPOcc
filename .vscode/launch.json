@@ -6,18 +6,51 @@
     "configurations": [
 
         {
-            "name": "train1",
+            "name": "occsannet vggt train",
             "type": "debugpy",
             "request": "launch",
             "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py",
             "args": [
                 "--py-config", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/mono_vggt_bin16_release_custom.py",
-                "--work-dir", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/outputs/train1",
+                "--work-dir", "/c20250502/wangyushen/Outputs/gpocc/vggt_bin16/train1",
             ],
             "env": {
                 "PYTHONPATH": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src:/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src/gpocc/Depth-Anything-V2/metric_depth",
             },
             "console": "integratedTerminal"
-        }
+        },
+        {
+            "name": "occsannet dpt train",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py",
+            "args": [
+                "--py-config",
+                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/mono_dpt_bin16_release_custom.py",
+                "--work-dir",
+                "/c20250502/wangyushen/Outputs/gpocc/mono_dpt_bin16/train1",
+            ],
+            "env": {
+                "PYTHONPATH": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src:/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src/gpocc/Depth-Anything-V2/metric_depth",
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "EmbodiedOcc val",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py",
+            "args": [
+                "--py-config",
+                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_vggt_custom.py",
+                "--work-dir",
+                "/c20250502/wangyushen/Outputs/gpocc/embodiedocc_vggt_bin16/val1",
+                "--evaluate",
+            ],
+            "env": {
+                "PYTHONPATH": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src:/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/src/gpocc/Depth-Anything-V2/metric_depth",
+            },
+            "console": "integratedTerminal"
+        },
     ]
 }

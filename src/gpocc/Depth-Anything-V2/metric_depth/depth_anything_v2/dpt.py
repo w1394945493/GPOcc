@@ -156,16 +156,16 @@ class DPTHead(nn.Module):
                 readout = cls_token.unsqueeze(1).expand_as(x)
                 x = self.readout_projects[i](torch.cat((x, readout), -1))
             else:
-                x = x[0]
+                x = x[0]    # (1 1036 768) 
             
-            x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
+            x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w)) # (1 768 28 37)
             
-            x = self.projects[i](x)
-            x = self.resize_layers[i](x)
+            x = self.projects[i](x)         # (1 96 38 37)
+            x = self.resize_layers[i](x)    # (1 96 112 148)
             
             out.append(x)
 
-        layer_1, layer_2, layer_3, layer_4 = out
+        layer_1, layer_2, layer_3, layer_4 = out    # (1 96 112 148) (1 192 56 74) (1 384 28 37) (1 768 14 19)
 
         layer_1_rn = self.scratch.layer1_rn(layer_1)
         layer_2_rn = self.scratch.layer2_rn(layer_2)
@@ -179,7 +179,7 @@ class DPTHead(nn.Module):
 
         out = self.scratch.output_conv1(path_1)
 
-        return out
+        return out  # (1 64 224 296)
 
         import pdb; pdb.set_trace()
 
@@ -215,8 +215,8 @@ class DepthAnythingV2(nn.Module):
         
         self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
 
-    def custom_forward(self, x):
-        patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
+    def custom_forward(self, x):    # dav2: 提取[2 5 8 11]中间层特征, 使用norm后patch token和class token
+        patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14 # 28 37
         features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         return features, patch_h, patch_w
 

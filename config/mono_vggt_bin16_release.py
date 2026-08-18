@@ -9,7 +9,7 @@ optimizer_wrapper = dict(
             'backbone': dict(lr_mult=0.1)}
     ),
 )
-grad_max_norm = 1.0
+grad_max_norm = 1.0 # grad_max_norm
 amp = False
 seed = 1
 print_freq = 50

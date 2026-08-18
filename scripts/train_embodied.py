@@ -69,23 +69,39 @@ def main(args):
     if args.vis_freq:
         vis_freq = args.vis_freq
 
-    # init DDP
-    distributed = True
-    world_size = int(os.environ["WORLD_SIZE"])  # number of nodes
-    rank = int(os.environ["RANK"])  # node id
-    gpu = int(os.environ['LOCAL_RANK'])
-    
-    dist.init_process_group(
-        backend="nccl", init_method=f"env://", 
-        world_size=world_size, rank=rank
-    )
+    # # init DDP
+    # distributed = True
+    # world_size = int(os.environ["WORLD_SIZE"])  # number of nodes
+    # rank = int(os.environ["RANK"])  # node id
+    # gpu = int(os.environ['LOCAL_RANK'])
 
-    # dist.barrier()
-    torch.cuda.set_device(gpu)
+    # dist.init_process_group(
+    #     backend="nccl", init_method=f"env://",
+    #     world_size=world_size, rank=rank
+    # )
+    # # dist.barrier()
+    # torch.cuda.set_device(gpu)
+    distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
 
-    if not is_main_process():
-        import builtins
-        builtins.print = pass_print
+    if distributed:
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["RANK"])
+        gpu = int(os.environ["LOCAL_RANK"])
+
+        torch.cuda.set_device(gpu)
+
+        dist.init_process_group(
+            backend="nccl", init_method="env://", world_size=world_size, rank=rank
+        )
+    else:
+        world_size = 1
+        rank = 0
+        gpu = 0
+        torch.cuda.set_device(gpu)
+
+        if not is_main_process():
+            import builtins
+            builtins.print = pass_print
 
     # configure logger
     if is_main_process():
@@ -125,6 +141,10 @@ def main(args):
             find_unused_parameters=find_unused_parameters)
     else:
         my_model = my_model.cuda()
+
+    # ================================================#
+    model = my_model.module if distributed else my_model
+
     logger.info('done ddp model')
     # build dataloader
     from gpocc.dataset import build_dataloader
@@ -144,7 +164,7 @@ def main(args):
         cfg.resume_from = osp.join(args.work_dir, 'latest.pth')
     if args.resume_from:
         cfg.resume_from = args.resume_from
-    
+
     logger.info(f'resume from: {cfg.resume_from}')
     logger.info(f'work dir: {args.work_dir}')
 
@@ -258,16 +278,16 @@ def main(args):
                 K_Frames = len(metas[0]['monometa_list'])
                 scenemetas = [meta['monometa_list'] for meta in metas]
 
-                my_model.module.scene_init(metas)
-                if isinstance(my_model.module, VGGTGaussianSegmentorOnline):
+                model.scene_init(metas)
+                if isinstance(model, VGGTGaussianSegmentorOnline):
                     # reset
-                    my_model.module.global_gaussians = None
+                    model.global_gaussians = None
 
                 for i in range(K_Frames):
                     img = imgs[:, :, i, :, :, :].unsqueeze(2)
                     label = labels[:, i, :, :, :].unsqueeze(1)
 
-                    my_model.module.update_global_mask(scenemetas, frame_idx=i)
+                    model.update_global_mask(scenemetas, frame_idx=i)
 
                     with torch.cuda.amp.autocast(enabled=amp):
                         result_dict, global_result_dict = my_model(
@@ -327,7 +347,7 @@ def main(args):
 
                     if (i == K_Frames - 1):
 
-                        label_mask = my_model.module.global_mask_thistime
+                        label_mask = model.global_mask_thistime
                         assert len(label_mask) == 1
                         label_mask = label_mask[0].cpu()
                         voxel_predict = voxel_predict[label_mask]
@@ -335,7 +355,7 @@ def main(args):
 
                         CalMeanIou_Global.add_batch(voxel_predict, voxel_label)
 
-                        assert len(my_model.module.global_gaussians) == 1, 'only support bs=1'
+                        assert len(model.global_gaussians) == 1, 'only support bs=1'
 
                 if i_iter_val % print_freq == 0 and is_main_process():
 
