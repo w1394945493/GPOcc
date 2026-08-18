@@ -868,10 +868,27 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
         test_mode=False,
         only_global=False,
     ):
+        """处理一帧输入，并把该帧 Gaussian 增量融合进全局地图。
 
+        ``result_dict`` 保存当前帧的局部预测；``global_result_dict`` 保存
+        融合截至当前帧的所有 Gaussian 后得到的全局体素预测。该方法会更新
+        ``self.global_gaussians``，因此同一场景的各帧必须按时间顺序调用。
+
+        Args:
+            scenemeta: batch 中各场景的完整多帧元信息。
+            imgs: 当前帧图像。
+            metas: 当前帧对应的相机参数和局部体素元信息。
+            label: 当前帧局部体素标签。
+            frame_idx: 当前帧在场景序列中的下标，0 表示新场景首帧。
+            only_global: 为 True 时父类只生成局部 Gaussian，不计算局部体素预测。
+        """
+
+        # 训练时切断历史全局地图的计算图，防止计算图随帧数持续增长。
         if self.training and self.detach_global_each_frame:
             self.detach_global_gaussians()
-        # 调用父类，得到当前帧局部Gaussian
+
+        # 1. 调用单帧模型：从当前图像预测相机坐标系下的局部 Gaussian。
+        # only_global=False 时，result_dict 还包含当前帧的深度和局部 occupancy。
         result_dict, _, _ = super().forward(
             imgs=imgs,
             metas=metas,
@@ -882,6 +899,8 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             return_gaussian=only_global,
         )
 
+        # 2. 推理阶段把局部 Gaussian 统一变换到世界坐标系，供跨帧融合。
+        # 当前实现的在线推理明确只支持 batch_size=1。
         if not self.training:
             batch_size = len(metas)
             assert batch_size == 1
@@ -891,14 +910,15 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
             scene_size = metas[batch_idx]['scene_size'].cuda()
             cam2world = metas[batch_idx]['cam2world'].cuda()
             nyu_pc_max = nyu_pc_min + scene_size
-            # 将当前帧在相机坐标系下预测的gaussian，转换到世界坐标系下，方便后续跨帧累计，合并到global gaussians
+            # 同时转换 Gaussian 中心和旋转；scale、opacity、semantics 保持不变。
             sparse_means, sparse_origi_opa, sparse_opacities, sparse_scales, sparse_rots = self.prepare_gaussian_args_v2(
                 result_dict['gaussian'], [metas[batch_idx]])
             sparse_qs = matrix_to_quaternion(sparse_rots)
 
-            # 测试阶段：筛选掉低opacity的gaussian
+            # 低 opacity Gaussian 通常是不可靠或接近透明的候选，进入全局地图前将其剔除。
             pos_mask = (sparse_origi_opa[batch_idx] > self.opacities_threshold).squeeze(1)
 
+            # 用筛选后的世界坐标 Gaussian 替换父类返回的相机坐标 Gaussian。
             result_dict['gaussian'] = GaussianPrediction(
                 means=sparse_means[batch_idx][pos_mask][None],
                 scales=sparse_scales[batch_idx][pos_mask][None],
@@ -909,25 +929,33 @@ class VGGTGaussianSegmentorOnline(VGGTGaussianSegmentor):
         else:
             mask = None
 
+        # 3. 维护跨帧全局 Gaussian 地图。
         if frame_idx > 0:
+            # 后续帧：依据空间距离寻找新旧 Gaussian 邻居，并对位置、语义、
+            # scale、opacity 和 rotation 做规则式加权融合；未匹配项直接保留。
             merge_fn = self.add_gaussian_nonlearnable
             global_gaussians = merge_fn(
+                # detach_local 用于阻止全局预测的梯度回传到当前帧局部分支。
                 self.detach_gaussians(result_dict['gaussian']) if (self.detach_local and self.training) else result_dict['gaussian'],
                 frame_idx=frame_idx,
                 scenemetas=scenemeta,
                 global_gaussians=self.global_gaussians,
             )
         else:
+            # 首帧没有历史状态，直接用当前帧 Gaussian 初始化全局地图。
             global_gaussians = [result_dict['gaussian']]
 
+        # 4. 将融合后的全局 Gaussian 聚合到场景级体素网格，生成 occupancy logits。
+        # 推理阶段始终计算；训练阶段由 train_global_pred 控制，以节省计算和显存。
         if (not self.training) or self.train_global_pred:
             global_result_dict = self.gaussian2pred(
                 gaussians=global_gaussians,
                 metas=[m[0] for m in scenemeta]
-            )   # gaussian 体素化
+            )
         else:
             global_result_dict = None
 
+        # 5. 保存本帧融合结果，作为下一帧的历史地图。该赋值使 forward 带有状态。
         self.global_gaussians = global_gaussians
         return result_dict, global_result_dict
 

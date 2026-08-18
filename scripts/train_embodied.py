@@ -225,6 +225,11 @@ def main(args):
             state_dict = revise_ckpt_2(state_dict)
             logger.info(my_model.load_state_dict(state_dict, strict=False))
 
+    # 三套指标对应三种不同的评估口径：
+    # 1) CalMeanIou：当前场景内，每一帧融合后的“全局地图预测”累计指标；
+    # 2) CalMeanIou_Fov：单帧局部 OCC 在该帧相机视锥内的累计指标；
+    # 3) CalMeanIou_Global：每个场景最后一帧的全局地图，只在整个序列累计
+    #    观测过的区域内统计；该指标跨场景累计，并作为最终 embodied 指标。
     CalMeanIou = SSCMetricsTorch(n_classes=12)
     CalMeanIou_Fov = SSCMetricsTorch(n_classes=12)
     CalMeanIou_Global = SSCMetricsTorch(n_classes=12)
@@ -232,6 +237,8 @@ def main(args):
     scenemeta_keys = ['global_scene_dim', 'global_scene_size', 'global_labels', 'global_pts', 'global_scene_origin', 'global_mask']
     metas_tensor_keys_inv = ['name', 'cam2img', 'world2img', 'rgb_path', 'depth_path','num_depth', 'occ_mask_valid', 'img_shape', 'img_aug_matrix', 'img_depthbranch']
 
+    # False：模型同时输出当前帧局部 OCC(result_dict)和融合后的全局 OCC
+    # (global_result_dict)；True：跳过局部体素化，只生成/融合 Gaussian 和全局 OCC。
     only_global = False
 
     if args.evaluate:
@@ -256,6 +263,9 @@ def main(args):
         with torch.no_grad():
             for i_iter_val, data in enumerate(val_dataset_loader):
 
+                # CalMeanIou 只统计当前场景的逐帧全局结果，因此每个新场景重置。
+                # 注意：CalMeanIou_Fov 当前没有在这里重置，所以它会跨场景累计；
+                # CalMeanIou_Global 也跨场景累计，用于最后汇总整个验证集。
                 CalMeanIou.reset()
 
                 for i in range(len(data)):
@@ -278,18 +288,26 @@ def main(args):
                 K_Frames = len(metas[0]['monometa_list'])
                 scenemetas = [meta['monometa_list'] for meta in metas]
 
+                # 初始化该场景的全局体素坐标、全局标签和累计观测 mask。
                 model.scene_init(metas)
                 if isinstance(model, VGGTGaussianSegmentorOnline):
-                    # reset
+                    # 新场景不能继承上一个场景的 Gaussian 地图。
                     model.global_gaussians = None
 
+                # 按时间顺序逐帧推理；每次 forward 都会把当前帧 Gaussian 融入
+                # model.global_gaussians，因此不能打乱同一场景中的帧顺序。
                 for i in range(K_Frames):   # 30
                     img = imgs[:, :, i, :, :, :].unsqueeze(2)   # (1 1 1 392 518 3)
                     label = labels[:, i, :, :, :].unsqueeze(1)  # (1 1 60 60 36)
 
+                    # 将当前帧可见的全局体素并入累计 mask。最后一帧时，该 mask
+                    # 表示整个 embodied 序列至少观测到一次的区域。
                     model.update_global_mask(scenemetas, frame_idx=i)
 
                     with torch.cuda.amp.autocast(enabled=amp):
+                        # result_dict：当前帧、相机局部范围内的 OCC 预测；
+                        # global_result_dict：融合第 0..i 帧 Gaussian 后，在整张
+                        # 场景级体素网格上重新聚合得到的全局 OCC 预测。
                         result_dict, global_result_dict = my_model(
                             scenemeta=scenemetas,
                             imgs=img,
@@ -301,10 +319,17 @@ def main(args):
                             test_mode=False,
                             only_global=only_global)
 
+                    # ---------------- 逐帧全局 OCC 评估 ----------------
+                    # ce_input[0] 的形状为 [C, X_global, Y_global, Z_global]，对类别维
+                    # argmax 后得到截至当前帧的整场景预测。这里尚未使用累计观测
+                    # mask，因此 CalMeanIou 衡量的是每个时刻完整全局网格的预测，
+                    # 并把同一场景所有帧作为样本累计起来。
                     assert len(global_result_dict['ce_label']) == 1
-                    voxel_predict = global_result_dict['ce_input'][0].argmax(dim=0).long() # [1, 60, 60, 36]
-                    voxel_label = global_result_dict['ce_label'][0].long() # [1, 60, 60, 36]
+                    voxel_predict = global_result_dict['ce_input'][0].argmax(dim=0).long()
+                    voxel_label = global_result_dict['ce_label'][0].long()
 
+                    # 模型输出类别约定：0 是 ignore，12 是 empty；SSCMetrics 的
+                    # 约定则是 255 为 ignore、0 为 empty，所以评估前统一重映射。
                     voxel_predict[voxel_predict == 0] = 255
                     voxel_predict[voxel_predict == 12] = 0
                     voxel_label[voxel_label == 0] = 255
@@ -313,9 +338,14 @@ def main(args):
 
                     if not only_global: # False
 
+                        # ---------------- 单帧局部/FOV OCC 评估 ----------------
+                        # result_dict 来自父类单帧分支，与历史帧的全局融合结果无关。
+                        # ce_input 形状为 [B, C, X_local, Y_local, Z_local]。
                         fov_voxel_predict = result_dict['ce_input'].argmax(dim=1).long() # [1, 60, 60, 36]
                         fov_voxel_label = result_dict['ce_label'].long() # [1, 60, 60, 36]
 
+                        # 只保留当前相机视锥内的体素。布尔索引会把空间维展平，
+                        # 但 IoU 只依赖逐体素类别计数，因此不会影响指标计算。
                         this_fov_mask = metas[0]['monometa_list'][i]['fov_mask'].unsqueeze(0).bool()
                         fov_voxel_predict = fov_voxel_predict[this_fov_mask].unsqueeze(0)
                         fov_voxel_label = fov_voxel_label[this_fov_mask].unsqueeze(0)
@@ -332,6 +362,8 @@ def main(args):
                         if i and (i + 1) % 10 == 0:
                             frame_info = f'[{i} / {K_Frames}]'
 
+                            # glo：当前场景从第 0 帧到第 i 帧的全局预测累计值；
+                            # fov：截至此处所有已处理场景/帧的局部视锥累计值。
                             status = CalMeanIou.get_stats(distributed=False)
                             sem_cls = status["iou_ssc"]
                             sem = status["iou_ssc_mean"]
@@ -345,8 +377,12 @@ def main(args):
                             logger.info(f'Current fov/glo {frame_info} iou of geo is {fov_geo:.5f} / {geo:.5f}')
                             logger.info(f'Current fov/glo {frame_info} iou of sem is {fov_sem:.5f} / {sem:.5f}')
 
+                    # ---------------- 场景级最终全局 OCC 评估 ----------------
+                    # 只取最后一帧，因为此时 global_gaussians 已融合完整段序列。
                     if (i == K_Frames - 1):
 
+                        # 再限制到整个序列实际观察过的区域，避免把从未进入任一
+                        # 相机视野的体素作为模型错误。该口径才是最终全局结果。
                         label_mask = model.global_mask_thistime
                         assert len(label_mask) == 1
                         label_mask = label_mask[0].cpu()
@@ -359,6 +395,8 @@ def main(args):
 
                 if i_iter_val % print_freq == 0 and is_main_process():
 
+                    # CalMeanIou_Global 没有按场景重置，因此这里显示截至当前场景
+                    # 的验证集累计结果，而不是当前单个场景的结果。
                     global_step = f'{i_iter_val} / {len(val_dataset_loader)}'
                     global_status = CalMeanIou_Global.get_stats()
                     global_sem_cls = global_status["iou_ssc"]
@@ -368,6 +406,7 @@ def main(args):
                     logger.info(f'Current global [{global_step}] iou of geo is {global_geo}')
                     logger.info(f'Current global [{global_step}] iou of sem is {global_sem}')
 
+            # 汇总所有场景（以及所有 DDP rank）的最终场景级全局 OCC 指标。
             global_status = CalMeanIou_Global.get_stats(distributed=distributed)
             global_sem_cls = global_status["iou_ssc"]
             global_sem = global_status["iou_ssc_mean"]
