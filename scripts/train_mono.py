@@ -55,6 +55,12 @@ def get_dist_info():
 def save_model(
     model, optimizer=None, scheduler=None, epoch=None, save_epoch=False, **kwargs
 ):
+    """保存可恢复训练的 checkpoint。
+
+    每轮都会覆盖 latest.pth；达到 save_freq 时额外保留 epoch_N.pth。
+    除模型参数外，还保存 optimizer、scheduler、epoch、global_iter 和最佳指标，
+    以便中断后继续训练，而不只是做纯模型权重加载。
+    """
     dict_to_save = {"state_dict": model.state_dict()}
 
     if optimizer is not None:
@@ -80,10 +86,14 @@ def save_model(
 
 
 def main(args):
-    # global settings
+    # ====================================================================== #
+    # 1. 读取实验配置并初始化全局运行参数
+    # ====================================================================== #
+    # benchmark=True 会为固定输入尺寸选择更快的 cuDNN kernel；如果输入尺寸
+    # 频繁变化，首次搜索 kernel 的额外成本可能抵消收益。
     torch.backends.cudnn.benchmark = True
 
-    # load config
+    # py-config 同时定义模型、数据集、损失、优化器以及训练轮数等全部实验参数。
     cfg = Config.fromfile(args.py_config)
     set_random_seed(cfg.seed) # seed:1
     cfg.work_dir = args.work_dir
@@ -97,7 +107,10 @@ def main(args):
     if args.vis_freq:
         vis_freq = args.vis_freq
 
-    # ====================================== #
+    # ====================================================================== #
+    # 2. 初始化单卡或 torchrun DDP 环境
+    # ====================================================================== #
+    # torchrun 会注入 RANK/WORLD_SIZE/LOCAL_RANK；普通 python 启动时则走单卡。
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     if distributed:
         # init DDP
@@ -109,7 +122,7 @@ def main(args):
         torch.cuda.set_device(rank % num_gpus)
         dist.init_process_group(
             backend="nccl",
-            # init_method=f"env://", 
+            # init_method=f"env://",
             world_size=world_size,
         )
         rank, world_size = get_dist_info()
@@ -122,7 +135,10 @@ def main(args):
         import builtins
         builtins.print = pass_print
 
-    # configure logger
+    # ====================================================================== #
+    # 3. 创建工作目录和日志
+    # ====================================================================== #
+    # 只由 rank 0 保存一份最终配置，便于复现实验。
     if is_main_process():
         os.makedirs(args.work_dir, exist_ok=True)
         cfg.dump(osp.join(args.work_dir, osp.basename(args.py_config)))
@@ -138,18 +154,23 @@ def main(args):
         log_level='INFO')
     logger.info(f'Config:\n{cfg.pretty_text}')
 
-    # ===================================#
-    # 定义model build model
+    # ====================================================================== #
+    # 4. 根据 cfg.model 构建 Mono Gaussian OCC 模型
+    # ====================================================================== #
+    # DPT 和 VGGT 配置当前都构建 VGGTGaussianSegmentor，主要区别是
+    # use_depthanything 是否选择 DepthAnything/DINOv2 作为图像 backbone。
     from gpocc.model import build_model
     my_model = build_model(cfg.model).cuda()
 
     if cfg.flag_depthanything_as_gt:
+        # 仅旧独立深度辅助分支使用；当前 release custom 配置通常为 False。
         my_model.depthanything.requires_grad_(False)
 
     n_parameters = sum(p.numel() for p in my_model.parameters() if p.requires_grad)
     logger.info(f'Number of params: {n_parameters}') # 可学习参数 944,309,688
 
     if distributed:
+        # DDP 为每个进程复制一份模型并在 backward 时同步参数梯度。
         find_unused_parameters = cfg.get('find_unused_parameters', True)
         if cfg.get('track_running_stats', False):
             my_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(my_model)
@@ -164,8 +185,11 @@ def main(args):
 
     logger.info('done ddp model')
 
-    # ======================================#
-    # build dataloader
+    # ====================================================================== #
+    # 5. 构建基础 Dataset、外层 Wrapper 和 DataLoader
+    # ====================================================================== #
+    # build_dataloader 内部先用 *_dataset_config 读取样本，再用
+    # *_wrapper_config 做图像增强/布局转换，最后按 *_loader_config 组成 batch。
     from gpocc.dataset import build_dataloader
     train_dataset_loader, val_dataset_loader = \
         build_dataloader(
@@ -178,12 +202,18 @@ def main(args):
             dist=distributed,
         )
 
-    # get optimizer, loss, scheduler
+    # ====================================================================== #
+    # 6. 构建优化器、混合精度、OCC 损失和学习率调度器
+    # ====================================================================== #
     amp = cfg.get('amp', True)
+    # MMEngine OptimWrapper 根据配置构建 AdamW，并支持 backbone 的 lr_mult。
     optimizer = build_optim_wrapper(my_model, cfg.optimizer_wrapper)
+    # amp=False 时 GradScaler 自动退化为普通 FP32 更新。
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     from gpocc.loss import GPD_LOSS
+    # 配置中的 MultiLoss：Focal + Lovasz + Semantic Scaling + Geometric Scaling。
     loss_func = GPD_LOSS.build(cfg.loss).cuda()
+    # 以 iteration 而非 epoch 更新 cosine LR；warmup 固定为 1000 iterations。
     scheduler = CosineLRScheduler(
         optimizer,
         t_initial=len(train_dataset_loader)*max_num_epochs,
@@ -193,9 +223,12 @@ def main(args):
         t_in_epochs=False
     )
 
-    # CalMeanIou = SSCMetrics(n_classes=12)
+    # OCC 验证指标：统计几何 IoU、各语义类 IoU 和语义 mIoU。
     CalMeanIou = SSCMetricsTorch(n_classes=12)
-    # resume and load
+
+    # ====================================================================== #
+    # 7. 确定断点续训/预训练权重来源
+    # ====================================================================== #
     epoch = 0
     best_val_iou = 0
     best_val_miou = 0
@@ -211,6 +244,7 @@ def main(args):
     logger.info(f'work dir: {args.work_dir}')
 
     if cfg.resume_from and osp.exists(cfg.resume_from):
+        # resume：恢复模型和完整训练状态。evaluate 时只需要恢复模型及计数信息。
         map_location = 'cpu'
         ckpt = torch.load(cfg.resume_from, map_location=map_location)
         print(my_model.load_state_dict(revise_ckpt(ckpt['state_dict']), strict=False))
@@ -225,6 +259,7 @@ def main(args):
         global_iter = ckpt['global_iter']
         print(f'successfully resumed from epoch {epoch}')
     elif cfg.load_from:
+        # load_from：只加载模型权重，常用于从发布 checkpoint 开始评估/微调。
         ckpt = torch.load(cfg.load_from, map_location='cpu')
         if 'state_dict' in ckpt:
             state_dict = ckpt['state_dict']
@@ -237,12 +272,17 @@ def main(args):
             state_dict = revise_ckpt_2(state_dict)
             print(my_model.load_state_dict(state_dict, strict=False))
 
+    # 不在该列表里的 metadata 会在每个 iteration 中转成 Tensor 并移到 GPU。
+    # img_depthbranch 被脚本另行显式搬到 GPU，但当前 VGGT/DPT forward 不读取它。
     metas_tensor_keys_inv = ['depth_gt_np_valid', 'depth_gt_np', 'name', 'cam2img', 'world2img', 'rgb_path', 'depth_path','num_depth', 'occ_mask_valid', 'occ_mask_valid_fov', 'img_shape', 'img_aug_matrix']
 
     total_params = sum(p.numel() for p in my_model.parameters())
     print(f"Total parameters: {total_params / 1e6:.2f} M")
 
     if args.evaluate:
+        # ================================================================== #
+        # 8A. 单独评估模式：只跑 val loader，不计算 loss、不更新参数
+        # ================================================================== #
         my_model.eval()
         CalMeanIou.reset()
         # loss_record = LossRecord(loss_func=loss_func)
@@ -252,12 +292,14 @@ def main(args):
         with torch.no_grad():
             for i_iter_val, data in enumerate(tqdm(val_dataset_loader)):
 
+                # custom_collate_fn 返回可修改 list；先将 batch 顶层 Tensor 搬到 GPU。
                 for i in range(len(data)):
                     if isinstance(data[i], torch.Tensor):
                         data[i] = data[i].cuda()
                 (imgs, metas, label) = data
 
                 device = imgs.device
+                # 把模型 forward 所需的数值 metadata 统一转换成当前 GPU Tensor。
                 for meta in metas:
                     for k, v in meta.items():
                         if k not in metas_tensor_keys_inv:
@@ -268,8 +310,7 @@ def main(args):
                     meta["img_depthbranch"] = meta["img_depthbranch"].to(device)
 
                 with torch.cuda.amp.autocast(enabled=amp):
-                    # ===========================================#
-
+                    # 单帧推理输出：result_dict 是局部 OCC；其余返回值在评估中不用。
                     result_dict, my_occ, predtoreturn = my_model(
                         imgs=imgs,
                         metas=metas,
@@ -279,15 +320,19 @@ def main(args):
                         test_mode=True
                     )
 
+                # ce_input=[B,C,60,60,36]，在类别维 argmax 得到体素类别。
                 voxel_predict = result_dict['ce_input'].argmax(dim=1).long()
                 voxel_label = result_dict['ce_label'].long()
 
+                # 模型标签定义：0=unknown/ignore、12=empty；SSCMetrics 定义：
+                # 255=ignore、0=empty，因此评估前做类别重映射。
                 voxel_predict[voxel_predict == 0] = 255
                 voxel_predict[voxel_predict == 12] = 0
                 voxel_label[voxel_label == 0] = 255
                 voxel_label[voxel_label == 12] = 0
 
                 if args.eval_fov:
+                    # 可选：视锥外体素置为 ignore，只评估当前相机实际可见范围。
                     fov_mask = metas[0]['fov_mask']
                     voxel_label[0][fov_mask == 0] = 255
                     voxel_predict[0][fov_mask == 0] = 255
@@ -321,10 +366,13 @@ def main(args):
 
         return
 
-    # training
+    # ====================================================================== #
+    # 8B. 训练主循环
+    # ====================================================================== #
     while epoch < max_num_epochs:
 
         my_model.train()
+        # DDP sampler 每个 epoch 使用不同随机种子，确保各 rank 数据划分正确洗牌。
         if hasattr(train_dataset_loader.sampler, 'set_epoch'):
             train_dataset_loader.sampler.set_epoch(epoch)
         loss_record = LossRecord(loss_func=loss_func)
@@ -332,6 +380,7 @@ def main(args):
         data_time_s = time.time()
         time_s = time.time()
         for i_iter, data in enumerate(train_dataset_loader):
+            # -------------------- 8B-1. 数据搬运与 metadata 整理 --------------------
             for i in range(len(data)):
                 if isinstance(data[i], torch.Tensor):
                     data[i] = data[i].cuda()
@@ -347,7 +396,7 @@ def main(args):
                             meta[k] = torch.as_tensor(v, device=device)
                 meta['img_depthbranch'] = meta['img_depthbranch'].to(device)
 
-            # forward + backward + optimize
+            # -------------------- 8B-2. 模型前向 --------------------
             data_time_e = time.time()
 
             with torch.cuda.amp.autocast(enabled=amp):
@@ -357,14 +406,16 @@ def main(args):
                     grad_frames=cfg.grad_frames,
                     test_mode=False)
 
+            # -------------------- 8B-3. 组合训练损失 --------------------
+            # DPT/VGGT 分支在配置 MultiLoss 外额外加入深度 Huber Loss。
+            # 对 mono_dpt_bin16_release_custom.py，总损失为：
+            # 0.2*Depth + 100*Focal + Lovasz + SemScal + GeoScal。
             assert cfg.ignore_label == 0
-            # 损失计算
-            # TODO hard code
             if 'vggt' in args.py_config.lower() or 'dpt' in args.py_config.lower():
                 total_loss = 0.
                 all_loss_dict = {}
-
-                # if getattr(cfg, 'no_depth_loss', False):
+                # 深度预测损失
+                # 深度预测由 anchor_depth_pred 产生；GT 使用 meta['depth_gt']。
                 depth_loss = DepthLoss(
                     input_dict=dict(
                         depth_preds='depth_pred',
@@ -377,11 +428,14 @@ def main(args):
                 all_loss_dict['depth_loss'] = depth_loss.detach().item()
 
                 if 'ce_label' in result_dict:
+                    # 对局部 60x60x36 OCC 计算配置中的四项 MultiLoss。
                     loss, loss_dict = loss_func(result_dict)
                     all_loss_dict.update(loss_dict)
                     total_loss = total_loss + loss
 
                 if sparse_result_dict is not None:
+                    # 预留的稀疏 Gaussian/OCC 辅助监督。当前模型通常返回 None，
+                    # 因而 release custom 配置实际不会产生 sparse loss。
                     if isinstance(sparse_result_dict, dict) and 'ce_label' in sparse_result_dict:
                         sparse_loss, sparse_loss_dict = loss_func(sparse_result_dict)
                         for k, v in sparse_loss_dict.items():
@@ -395,8 +449,10 @@ def main(args):
                 total_loss, loss_dict = loss_func(result_dict)
                 loss_record.update(loss=total_loss.item(), loss_dict=loss_dict)
 
+            # -------------------- 8B-4. 反向传播与参数更新 --------------------
             optimizer.zero_grad()
             scaler.scale(total_loss).backward()
+            # clip_grad_norm_ 前必须 unscale，确保裁剪的是实际梯度而非缩放后梯度。
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(my_model.parameters(), cfg.grad_max_norm)
 
@@ -404,6 +460,7 @@ def main(args):
 
             scaler.step(optimizer)
             scaler.update()
+            # 每次 iteration 更新一次 cosine learning rate。
             scheduler.step_update(global_iter)
             time_e = time.time()
 
@@ -430,7 +487,7 @@ def main(args):
             data_time_s = time.time()
             time_s = time.time()
 
-        # save checkpoint
+        # -------------------- 8B-5. 每个 epoch 保存 checkpoint --------------------
         if is_main_process():
             save_model(
                 my_model,
@@ -444,7 +501,8 @@ def main(args):
             )
 
         epoch += 1
-        # eval
+        # -------------------- 8B-6. 按 eval_freq 周期验证 --------------------
+        # 验证只统计局部 OCC 指标，不计算 loss，也不更新 best checkpoint。
         if epoch % eval_freq == 0:
             my_model.eval()
             CalMeanIou.reset()
