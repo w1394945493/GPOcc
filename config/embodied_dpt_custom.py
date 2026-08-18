@@ -19,7 +19,7 @@ print_freq = 1
 # 遗留训练参数：脚本会读取它们，但 embodied 评估流程不使用 epoch 循环。
 eval_freq = 10
 max_epochs = 10
-# load_from = 'work_dirs/mono_dpt_bin16/latest.pth'
+load_from = "/c20250502/wangyushen/Outputs/gpocc/dav2_bin16/train/latest.pth"
 load_from = None
 find_unused_parameters = True
 track_running_stats = True

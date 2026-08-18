@@ -1,6 +1,6 @@
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
 pip install --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt211/download.html
-
+python setup.py build_ext --inplace 
 # OccScanNet
 # vggt or dav2
 PYTHONPATH=`pwd`/src:`pwd`/src/gpocc/Depth-Anything-V2/metric_depth:$PYTHONPATH \
