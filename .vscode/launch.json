@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py",
             "args": [
-                "--py-config", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/mono_vggt_bin16_release_custom.py",
+                "--py-config", "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/customs/mono_vggt_bin16_release_custom.py",
                 "--work-dir", "/c20250502/wangyushen/Outputs/gpocc/vggt_bin16/train_debug",
             ],
             "env": {
@@ -26,7 +26,7 @@
             "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py",
             "args": [
                 "--py-config",
-                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/mono_dpt_bin16_release_custom.py",
+                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/customs/mono_dpt_bin16_release_custom.py",
                 "--work-dir",
                 "/c20250502/wangyushen/Outputs/gpocc/mono_dpt_bin16/train_debug",
             ],
@@ -42,7 +42,7 @@
             "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py",
             "args": [
                 "--py-config",
-                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_vggt_custom.py",
+                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/customs/embodied_vggt_custom.py",
                 "--work-dir",
                 "/c20250502/wangyushen/Outputs/gpocc/embodiedocc_vggt_bin16/val_debug",
                 "--evaluate",
@@ -59,7 +59,7 @@
             "program": "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py",
             "args": [
                 "--py-config",
-                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_dpt_custom.py",
+                "/vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/customs/embodied_dpt_custom.py",
                 "--work-dir",
                 "/c20250502/wangyushen/Outputs/gpocc/embodiedocc_dav2_bin16/val_debug",
                 "--evaluate",

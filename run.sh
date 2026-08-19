@@ -16,6 +16,7 @@ python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_mono.py \
 
 
 # EmbodiedOcc-ScanNet GPOcc仅推理 vggt
+# PYTHONPATH=... 需要有 \ 是一个命令，只对这一条命令生效
 PYTHONPATH=`pwd`/src:`pwd`/src/gpocc/Depth-Anything-V2/metric_depth:$PYTHONPATH \
 python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py \
     --py-config /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_vggt_custom.py \
@@ -28,6 +29,8 @@ python /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/scripts/train_embodied.py \
     --py-config /vepfs-mlp2/c20250502/haoce/wangyushen/GPOcc/config/embodied_dpt_custom.py \
     --work-dir /c20250502/wangyushen/Outputs/gpocc/embodiedocc_dav2_bin16/val1 \
     --evaluate \
+
+
 # ==================================================#
 # 火山引擎 多卡训练 OccScannet
 # vggt
